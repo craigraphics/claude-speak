@@ -208,8 +208,14 @@ def test_hook_speak_all(hook_env):
 def test_hook_shh(hook_env):
     env, calls = hook_env
     out = json.loads(run_hook(env, {"prompt": "shh"}).stdout)
-    assert out == {"decision": "block", "reason": "🔇 Stopped."}
+    assert out["decision"] == "block" and out["reason"] == "🔇 Stopped."
     assert "--stop" in calls.read_text()
+
+
+def test_hook_hides_the_original_prompt_line(hook_env):
+    env, _ = hook_env
+    out = json.loads(run_hook(env, {"prompt": "speak"}).stdout)
+    assert out["hookSpecificOutput"] == {"hookEventName": "UserPromptSubmit", "suppressOriginalPrompt": True}
 
 
 def test_hook_says_how_to_get_uv_when_it_is_missing(hook_env):

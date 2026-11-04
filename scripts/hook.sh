@@ -21,9 +21,11 @@ cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-speak"
 models="${CLAUDE_SPEAK_MODEL_DIR:-$cache}"
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-# Swallow the prompt and show this line instead.
+# Swallow the prompt and show this line instead. Claude Code always heads it with
+# "UserPromptSubmit operation blocked by hook:"; suppressOriginalPrompt drops the
+# "Original prompt: speak" line it would otherwise add (older versions ignore it).
 block() {
-  printf '{"decision":"block","reason":"%s"}\n' "$1"
+  printf '{"decision":"block","reason":"%s","hookSpecificOutput":{"hookEventName":"UserPromptSubmit","suppressOriginalPrompt":true}}\n' "$1"
   exit 0
 }
 
