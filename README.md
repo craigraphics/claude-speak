@@ -23,13 +23,13 @@ Install once per computer. If you keep several Claude accounts in separate confi
 
 ## Use
 
-| Type at the prompt | What you hear |
-| --- | --- |
-| `speak` | Claude's last reply: the message it wrote after its last tool call |
-| `speak all` | everything Claude wrote in its last turn, including "let me check…" |
-| `shh` | silence |
+| Type at the prompt | Or press | What you hear |
+| --- | --- | --- |
+| `speak` | `ctrl+x s` | Claude's last reply: the message it wrote after its last tool call |
+| `speak all` | `ctrl+x a` | everything Claude wrote in its last turn, including "let me check…" |
+| `shh` | `ctrl+x q` | silence |
 
-Typing `speak` while it's reading starts again from the top. The first time, the voice downloads first (a few seconds on a fast connection) and the reading starts when that's done.
+The keys work once you've added them (see [Keyboard shortcuts](#keyboard-shortcuts)). The commands `/speak`, `/speak-all` and `/shh` do the same as the words. Typing `speak` while it's reading starts again from the top. The first time, the voice downloads first (a few seconds on a fast connection) and the reading starts when that's done.
 
 Replies are turned into speech, not read symbol by symbol:
 
@@ -70,9 +70,29 @@ CLAUDE_SPEAK_VOICE=bm_george uv run --script ~/.cache/claude-speak/speak.py --te
 
 To list every voice: `uv run --script ~/.cache/claude-speak/speak.py --voices`.
 
-## Keyboard shortcut (optional)
+## Keyboard shortcuts
 
-After the first reading, `~/.cache/claude-speak/speak.py` holds a copy of the script that stays at that path when the plugin updates. You can bind it to a keyboard shortcut. It reads the newest reply from whichever Claude Code session wrote last, even while Claude is still working. In the commands below, replace `~/.local/bin/uv` with the output of `which uv`.
+**In Claude Code.** Put this in `~/.claude/keybindings.json`, or in `keybindings.json` inside your `CLAUDE_CONFIG_DIR` for another account. If the file already exists, add the `Chat` block to its `bindings` list. Then start a new Claude Code session.
+
+```json
+{
+  "$schema": "https://www.schemastore.org/claude-code-keybindings.json",
+  "bindings": [
+    {
+      "context": "Chat",
+      "bindings": {
+        "ctrl+x s": "command:speak:speak",
+        "ctrl+x a": "command:speak:speak-all",
+        "ctrl+x q": "command:speak:shh"
+      }
+    }
+  ]
+}
+```
+
+`ctrl+x s` means press `ctrl+x`, let go, then press `s`. You have 3 seconds for the second key. Claude Code uses `ctrl+x` this way for its own two-key shortcuts, and these three are free. A shortcut runs its command right away and replaces anything you've typed but not sent, so use it on an empty prompt. You can choose other keys: see [Claude Code's keybindings docs](https://code.claude.com/docs/en/keybindings).
+
+**Anywhere on your computer (optional).** After the first reading, `~/.cache/claude-speak/speak.py` holds a copy of the script that stays at that path when the plugin updates. You can bind it to a keyboard shortcut. It reads the newest reply from whichever Claude Code session wrote last, even while Claude is still working. In the commands below, replace `~/.local/bin/uv` with the output of `which uv`.
 
 - **macOS:** in the Shortcuts app, create a shortcut with a *Run Shell Script* action:
   `~/.local/bin/uv run --quiet --script ~/.cache/claude-speak/speak.py`
@@ -82,7 +102,7 @@ After the first reading, `~/.cache/claude-speak/speak.py` holds a copy of the sc
 
 ## How it works
 
-1. **The hook.** `hooks/hooks.json` registers a `UserPromptSubmit` hook, `scripts/hook.sh`, which looks at every prompt. Anything other than `speak`, `speak all` or `shh` passes straight through in a few milliseconds without starting a process. For those three words, the hook starts `scripts/speak.py` in the background and blocks the prompt, so it never reaches Claude.
+1. **The hook.** `hooks/hooks.json` registers a `UserPromptSubmit` hook, `scripts/hook.sh`, which looks at every prompt. Anything other than `speak`, `speak all` or `shh` (or the `/speak`, `/speak-all` and `/shh` commands, which a key shortcut sends) passes straight through in a few milliseconds without starting a process. For those, the hook starts `scripts/speak.py` in the background and blocks the prompt, so it never reaches Claude.
 2. **The reading.** `speak.py` finds the reply in the session transcript (`~/.claude/projects/…/<session>.jsonl`) and turns its markdown into sentences. Kokoro reads them, and the next sentence is generated while the current one plays.
 3. **The warm voice.** The first reading keeps the voice loaded and listens on a private socket (`~/.cache/claude-speak/speak.sock`), so later readings start at once. It unloads after 10 idle minutes.
 4. **The fallbacks.** If Kokoro can't run, the computer's own voice reads instead: `say` on macOS, `espeak-ng` on Linux.
@@ -91,6 +111,7 @@ After the first reading, `~/.cache/claude-speak/speak.py` holds a copy of the sc
 ## Troubleshooting
 
 - **Typing `speak` sends the word to Claude.** Restart Claude Code after installing. Then check that `/plugin` shows speak as enabled and that `/hooks` lists its `UserPromptSubmit` hook.
+- **A shortcut key does nothing.** Start a new session after editing `keybindings.json`. If it still does nothing, run `claude --debug` and look for lines starting with `[keybindings]`.
 - **No sound, or the robotic voice.** Look in `~/.cache/claude-speak/last.log`.
 - **Linux, no sound at all.** Install `libportaudio2`, or `pulseaudio-utils` / `alsa-utils`.
 

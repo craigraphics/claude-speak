@@ -175,7 +175,8 @@ def wait_for(path: Path) -> str:
 
 def test_hook_ignores_ordinary_prompts(hook_env):
     env, calls = hook_env
-    for prompt in ("hello", "please speak to the API", "speak up about this", "shh is a word"):
+    for prompt in ("hello", "please speak to the API", "speak up about this", "shh is a word",
+                   "/speakers", "/speak louder", "/other:speak", "/speak:"):
         result = run_hook(env, {"prompt": prompt, "transcript_path": "/x.jsonl"})
         assert result.returncode == 0 and result.stdout == "" and result.stderr == ""
     assert not calls.exists()
@@ -189,7 +190,7 @@ def test_hook_is_fast_for_ordinary_prompts(hook_env):
     assert (time.monotonic() - started) / 10 < 0.1
 
 
-@pytest.mark.parametrize("prompt", ["speak", "Speak", "  speak  ", "speak\n", "SPEAK"])
+@pytest.mark.parametrize("prompt", ["speak", "Speak", "  speak  ", "speak\n", "SPEAK", "/speak", "/speak:speak"])
 def test_hook_speaks_and_blocks_the_prompt(hook_env, prompt):
     env, calls = hook_env
     result = run_hook(env, {"session_id": "s", "transcript_path": "/tmp/a b/t.jsonl", "prompt": prompt})
@@ -199,15 +200,17 @@ def test_hook_speaks_and_blocks_the_prompt(hook_env, prompt):
     assert "--transcript /tmp/a b/t.jsonl" in call and "--all" not in call and "speak.py" in call
 
 
-def test_hook_speak_all(hook_env):
+@pytest.mark.parametrize("prompt", ["speak all", "/speak-all", "/speak:speak-all"])
+def test_hook_speak_all(hook_env, prompt):
     env, calls = hook_env
-    run_hook(env, {"transcript_path": "/t.jsonl", "prompt": "speak all"})
+    run_hook(env, {"transcript_path": "/t.jsonl", "prompt": prompt})
     assert "--all" in wait_for(calls)
 
 
-def test_hook_shh(hook_env):
+@pytest.mark.parametrize("prompt", ["shh", "/shh", "/speak:shh"])
+def test_hook_shh(hook_env, prompt):
     env, calls = hook_env
-    out = json.loads(run_hook(env, {"prompt": "shh"}).stdout)
+    out = json.loads(run_hook(env, {"prompt": prompt}).stdout)
     assert out["decision"] == "block" and out["reason"] == "🔇 Stopped."
     assert "--stop" in calls.read_text()
 

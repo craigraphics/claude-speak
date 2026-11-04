@@ -5,6 +5,9 @@
 #   speak all   hear the whole last turn, the "let me check…" narration included
 #   shh         stop
 #
+# or the plugin's commands /speak, /speak-all and /shh (also /speak:speak and so on,
+# which is what a key binding sends).
+#
 # Claude Code runs this on every prompt, so anything else leaves at the first check
 # without starting a single process. The trigger words are blocked: they never reach
 # Claude, so listening costs no tokens and doesn't wait on the model.
@@ -13,7 +16,7 @@ input=$(cat)
 
 shopt -s nocasematch
 ws='([[:space:]]|\\[nrt])*'
-trigger="\"prompt\"[[:space:]]*:[[:space:]]*\"${ws}(speak${ws}all|speak|shh)${ws}\""
+trigger="\"prompt\"[[:space:]]*:[[:space:]]*\"${ws}(/(speak:)?)?(speak${ws}all|speak-all|speak|shh)${ws}\""
 [[ $input =~ $trigger ]] || exit 0
 word=${BASH_REMATCH[0]}
 
