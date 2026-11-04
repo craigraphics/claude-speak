@@ -1,0 +1,13 @@
+{
+  "name": "speak",
+  "version": "0.1.0",
+  "description": "Hear Claude's last reply in a natural voice: type speak to listen, shh to stop. Free, offline (Kokoro), no API keys.",
+  "author": {
+    "name": "William Craig",
+    "url": "https://craigraphics.com"
+  },
+  "homepage": "https://github.com/craigraphics/claude-speak",
+  "repository": "https://github.com/craigraphics/claude-speak",
+  "license": "MIT",
+  "keywords": ["text-to-speech", "tts", "voice", "accessibility", "kokoro"]
+}

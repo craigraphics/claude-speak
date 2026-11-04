@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "claude-speak",
+  "description": "Hear Claude Code's replies in a natural, free, offline voice.",
+  "owner": {
+    "name": "William Craig",
+    "url": "https://craigraphics.com"
+  },
+  "plugins": [
+    {
+      "name": "speak",
+      "source": "./",
+      "description": "Hear Claude's last reply in a natural voice: type speak to listen, shh to stop. Free, offline (Kokoro), no API keys.",
+      "category": "productivity"
+    }
+  ]
+}

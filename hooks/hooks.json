@@ -1,0 +1,16 @@
+{
+  "description": "Type speak to hear Claude's last reply, speak all for the whole turn, shh to stop.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
