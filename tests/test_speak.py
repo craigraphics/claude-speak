@@ -81,6 +81,17 @@ def test_latest_transcript_honours_claude_config_dir(tmp_path, monkeypatch):
     assert speak.latest_transcript() == new
 
 
+def test_session_transcript_is_found_by_id(tmp_path, monkeypatch):
+    f = tmp_path / ".claude-work" / "projects" / "p" / "abc-123.jsonl"
+    f.parent.mkdir(parents=True)
+    f.write_text("{}\n")
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(speak.Path, "home", lambda: tmp_path)
+    assert speak.session_transcript("abc-123") == f
+    assert speak.session_transcript("missing") is None
+    assert speak.session_transcript("../p/abc-123") is None
+
+
 # --- Making it speakable -----------------------------------------------------------------
 
 
@@ -198,6 +209,14 @@ def test_hook_speaks_and_blocks_the_prompt(hook_env, prompt):
     assert out["decision"] == "block" and "shh" in out["reason"]
     call = wait_for(calls)
     assert "--transcript /tmp/a b/t.jsonl" in call and "--all" not in call and "speak.py" in call
+
+
+def test_hook_finds_the_session_by_id_when_given_no_path(hook_env):
+    # The mod (hooks/speak.ts) knows the session id but not the transcript path.
+    env, calls = hook_env
+    run_hook(env, {"prompt": "speak", "session_id": "4c42-b7"})
+    call = wait_for(calls)
+    assert "--session 4c42-b7" in call and "--transcript" not in call
 
 
 @pytest.mark.parametrize("prompt", ["speak all", "/speak-all", "/speak:speak-all"])

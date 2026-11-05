@@ -130,6 +130,16 @@ def latest_transcript() -> Path | None:
     return newest[1] if newest else None
 
 
+def session_transcript(session_id: str) -> Path | None:
+    """The transcript of one session, found by its id (the file's name) in any config folder."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id or ""):
+        return None
+    for d in config_dirs():
+        for f in (d / "projects").glob(f"*/{session_id}.jsonl"):
+            return f
+    return None
+
+
 def entries_newest_first(path: Path) -> Iterator[dict]:
     """Transcript entries from the end backwards. Lines that don't parse (one still being written) are skipped."""
     for raw in reversed(path.read_bytes().splitlines()):
@@ -904,6 +914,7 @@ def keep_stable_copy() -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Read Claude Code's last reply out loud.")
     ap.add_argument("--transcript", type=Path, help="session transcript (.jsonl); default: the most recent one")
+    ap.add_argument("--session", help="session id, to find its transcript when no path is given")
     ap.add_argument("--all", action="store_true", help="read the whole last turn, not just its final message")
     ap.add_argument("--text", help="read this text instead of a reply")
     ap.add_argument("--dry-run", action="store_true", help="print what would be read")
@@ -934,7 +945,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.text is not None:
         text = to_speech(args.text)
     else:
-        path = args.transcript or latest_transcript()
+        path = args.transcript or (args.session and session_transcript(args.session)) or latest_transcript()
         if path is None or not path.exists():
             log(f"No transcript found ({path})")
             text = NOTHING_TO_READ

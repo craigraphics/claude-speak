@@ -74,7 +74,12 @@ fi
 
 args=()
 path_re='"transcript_path"[[:space:]]*:[[:space:]]*"([^"]*)"'
-[[ $input =~ $path_re ]] && [ -n "${BASH_REMATCH[1]}" ] && args+=(--transcript "${BASH_REMATCH[1]}")
+id_re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9_-]+)"'
+if [[ $input =~ $path_re ]] && [ -n "${BASH_REMATCH[1]}" ]; then
+  args+=(--transcript "${BASH_REMATCH[1]}")
+elif [[ $input =~ $id_re ]]; then
+  args+=(--session "${BASH_REMATCH[1]}") # from the mod, which knows the session but not the path
+fi
 [[ $word == *all* ]] && args+=(--all)
 
 # Detached, in its own process group, with every stream redirected, so Claude Code
