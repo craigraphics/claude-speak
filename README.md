@@ -2,7 +2,7 @@
 
 Hear Claude Code's replies instead of reading them. Type `speak` at the prompt and Claude's last reply is read out loud in a natural voice. Type `shh` to stop.
 
-- **Free.** No API key, no account, no subscription. The voice ([Kokoro](https://huggingface.co/hexgrad/Kokoro-82M)) runs on your computer and works offline after a one-time download of about 140 MB.
+- **Free.** No API key, no account, no subscription. The voice ([Kokoro](https://huggingface.co/hexgrad/Kokoro-82M)) runs on your computer and works offline after a one-time download: about 140 MB on Apple Silicon, 350 MB on Intel and AMD.
 - **Instant.** A hook catches the word before it reaches Claude, so listening costs no tokens and doesn't wait on the model. After the first reading the voice stays loaded for a while, and the next one starts in under a second.
 - **Only when you ask.** Nothing is read automatically.
 
@@ -52,7 +52,7 @@ Set these as environment variables in your shell profile, or in the `env` sectio
 | --- | --- | --- |
 | `CLAUDE_SPEAK_VOICE` | `af_heart` | Which voice reads (see below) |
 | `CLAUDE_SPEAK_SPEED` | `1.1` | `1.0` is Kokoro's normal pace |
-| `CLAUDE_SPEAK_QUALITY` | `fast` | `high` uses the full-precision model: a 326 MB download, 2–3× slower to generate |
+| `CLAUDE_SPEAK_QUALITY` | depends on the CPU | `fast` is the int8 model (a 114 MB download), `high` the full-precision one (326 MB). By default speak uses whichever generates faster on your CPU: `fast` on Apple Silicon and other ARM chips, where it's 2–3× quicker, and `high` on Intel and AMD, where int8 is the slower one, by more than 2× on some chips. If the voice pauses mid-reading, your computer is generating slower than it speaks: try the other one |
 | `CLAUDE_SPEAK_IDLE` | `600` | How many seconds the voice stays loaded after a reading. `0` unloads it right away |
 | `CLAUDE_SPEAK_ENGINE` | | `system` uses the computer's own voice instead of Kokoro |
 | `CLAUDE_SPEAK_THREADS` | auto | CPU threads for the voice. On Apple Silicon the default is the performance cores |
@@ -114,6 +114,7 @@ To list every voice: `uv run --script ~/.cache/claude-speak/speak.py --voices`.
 
 - **Typing `speak` sends the word to Claude.** Restart Claude Code after installing. Then check that `/plugin` shows speak as enabled and that `/hooks` lists its `UserPromptSubmit` hook.
 - **A shortcut key does nothing.** Start a new session after editing `keybindings.json`. If it still does nothing, run `claude --debug` and look for lines starting with `[keybindings]`.
+- **The voice pauses between sentences.** The computer is generating speech slower than it plays. Run once with `CLAUDE_SPEAK_DEBUG=1`: `last.log` then says which pieces were late. Try the other `CLAUDE_SPEAK_QUALITY`, and close anything busy on the CPU.
 - **No sound, or the robotic voice.** Look in `~/.cache/claude-speak/last.log`.
 - **Linux, no sound at all.** Install `libportaudio2`, or `pulseaudio-utils` / `alsa-utils`.
 

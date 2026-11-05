@@ -34,6 +34,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import platform
 import queue
 import re
 import shutil
@@ -75,13 +76,21 @@ SOCKET = _socket_path()
 # Pinned model files: (name, size, SHA-256), as GitHub publishes them for this release.
 MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/"
 MODELS = {
-    # 2-3x faster and a third of the download; the default, so it keeps up on battery too
+    # int8: a third of the download, and 2-3x faster on Apple Silicon and other ARM chips
     "fast": ("kokoro-v1.0.int8.onnx", 114119327, "ae315a79b623f244700e4afb9246c46a26066782e049ba174bf3ba433970ee9c"),
-    # full precision, for anyone who hears the difference
+    # full precision: on Intel and AMD the faster one, often by more than 2x (no fast int8 maths)
     "high": ("kokoro-v1.0.onnx", 325505369, "beb0d1848dee9a49da392cc3df26958d46cfa35d321edf434f52949153f0df3a"),
 }
 VOICES = ("voices-v1.0.bin", 28214398, "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d")
-DEFAULT_QUALITY = "fast"
+
+
+def default_quality(machine: str | None = None) -> str:
+    """The model that generates faster than it plays on this CPU. scripts/hook.sh picks the same."""
+    machine = (machine if machine is not None else platform.machine()).lower()
+    return "high" if machine in ("x86_64", "amd64", "i386", "i686") else "fast"
+
+
+DEFAULT_QUALITY = default_quality()
 
 DEFAULT_VOICE = "af_heart"
 DEFAULT_SPEED = 1.1
@@ -360,21 +369,15 @@ def _pause(piece: str) -> float:
     return 0.18 if piece[-1:] in (".", "!", "?") else 0.05
 
 
-def pieces(text: str) -> list[tuple[str, float]]:
-    """Sentence-sized pieces, each with the pause that follows it.
+_BREAK = re.compile(r"(?<=[.!?,;:])\s+(?=\S)")  # where a piece can be cut
 
-    The voice can't start until the first piece is ready, so it is kept short: one
-    sentence, and a long first sentence is cut at its first comma.
-    """
+
+def _sentences(text: str) -> list[tuple[str, float]]:
+    """Whole sentences, short ones joined up to 300 characters, each with the pause after it."""
     result: list[tuple[str, float]] = []
     for paragraph in text.split("\n"):
-        sentences = [s for s in re.split(r"(?<=[.!?])\s+", paragraph.strip()) if s]
-        if not result and sentences and len(sentences[0]) > 45:
-            m = re.match(r"(.{12,60}?[,;:])\s+(?=\S)", sentences[0])
-            if m:
-                sentences[0:1] = [m.group(1), sentences[0][m.end():]]
         buf = ""
-        for sentence in sentences:
+        for sentence in (s for s in re.split(r"(?<=[.!?])\s+", paragraph.strip()) if s):
             if buf and (not result or len(buf) >= 40 or len(buf) + len(sentence) > 300):
                 result.append((buf, _pause(buf)))
                 buf = sentence
@@ -384,6 +387,32 @@ def pieces(text: str) -> list[tuple[str, float]]:
             result.append((buf, _pause(buf)))
         if result:
             result[-1] = (result[-1][0], 0.45)  # a longer pause between paragraphs
+    return result
+
+
+def pieces(text: str) -> list[tuple[str, float]]:
+    """Pieces to generate one at a time, each with the pause that follows it.
+
+    The voice can't start until the first piece is ready, so it is short: one sentence,
+    a long one cut at a comma. After that, each piece has to be ready by the time the
+    ones before it have played. The voice generates at least twice as fast as it speaks
+    (scripts/speak.py picks the model for that), so a piece may be as long as the first
+    piece and everything after it so far: a long early sentence is cut at a comma too.
+    """
+    result: list[tuple[str, float]] = []
+    spoken = 0
+    for piece, pause in _sentences(text):
+        while len(piece) > (limit := min(300, spoken + len(result[0][0])) if result else 45):
+            breaks = [m for m in _BREAK.finditer(piece) if m.start() >= 12]
+            fitting = [m for m in breaks if m.start() <= limit]
+            cut = fitting[-1] if fitting else (breaks[0] if breaks else None)
+            if cut is None:
+                break
+            head, piece = piece[: cut.start()], piece[cut.end() :]
+            result.append((head, _pause(head)))
+            spoken += len(head)
+        result.append((piece, pause))
+        spoken += len(piece)
     return result
 
 
@@ -678,6 +707,7 @@ def read_aloud(text: str, voice: str, speed: float, get_engine: Callable, alive:
     SYNTH.submit(synthesize)  # queued behind the end of any reading this one replaced
     player = Player(alive)
     heard = 0
+    asked = time.monotonic()
     try:
         while alive():
             try:
@@ -691,9 +721,13 @@ def read_aloud(text: str, voice: str, speed: float, get_engine: Callable, alive:
             i, audio, rate, pause = item
             if i == 0:
                 log("Speaking")
+            elif DEBUG and time.monotonic() - asked > 0.1:
+                # A silence the listener hears: the voice generates slower than it speaks.
+                log(f"piece {i} was late: waited {time.monotonic() - asked:.1f}s")
             if not player.play(audio, rate, pause):
                 break
             heard = i + 1
+            asked = time.monotonic()
         player.close()
         log("Done" if alive() else "Stopped")
     except Exception as e:

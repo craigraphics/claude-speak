@@ -149,6 +149,36 @@ def test_a_long_first_sentence_is_cut_at_its_first_comma():
     assert parts[0] == ("When the voice is already loaded,", 0.05)
 
 
+REPLY = (
+    "Here is what changed. On this laptop, the smaller voice model was slower than the speech it made, "
+    "so the reading kept pausing between sentences. Speak now picks the full model on Intel and AMD "
+    "processors, which runs more than twice as fast here. The next sentence is ready before the current "
+    "one ends, so there should be no more waiting in the middle of a reply."
+)
+
+
+def test_early_long_sentences_are_cut_at_commas():
+    assert [p for p, _ in speak.pieces(REPLY)][:4] == [
+        "Here is what changed.",
+        "On this laptop,",
+        "the smaller voice model was slower than the speech it made,",
+        "so the reading kept pausing between sentences.",
+    ]
+
+
+def test_no_piece_keeps_the_voice_waiting():
+    # A voice that speaks 15 characters a second and generates twice as fast as that: every
+    # piece must be ready by the time the pieces before it, and their pauses, have been heard.
+    parts = speak.pieces(REPLY + " " + REPLY)
+    ready = len(parts[0][0]) / 30
+    plays_at = ready
+    for (before, pause), (piece, _) in zip(parts, parts[1:]):
+        ready += len(piece) / 30
+        plays_at += len(before) / 15 + pause
+        assert ready <= plays_at, piece
+    assert " ".join(p for p, _ in parts) == REPLY + " " + REPLY
+
+
 def test_paragraphs_get_a_longer_pause():
     parts = speak.pieces("One.\nTwo.")
     assert parts == [("One.", 0.45), ("Two.", 0.45)]
@@ -251,8 +281,33 @@ def test_hook_says_how_to_get_uv_when_it_is_missing(hook_env):
     assert out["reason"] == "🔇 Nothing was playing."
 
 
+@pytest.mark.parametrize(
+    "machine, quality",
+    [("arm64", "fast"), ("aarch64", "fast"), ("x86_64", "high"), ("AMD64", "high"), ("i686", "high")],
+)
+def test_the_default_model_suits_the_cpu(machine, quality):
+    assert speak.default_quality(machine) == quality
+
+
+def test_hook_expects_the_full_model_on_intel_and_amd(hook_env, tmp_path):
+    env, _ = hook_env
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "uname").write_text("#!/bin/sh\necho x86_64\n")
+    (fake / "uname").chmod(0o755)
+    env = {**env, "PATH": f"{fake}:{env['PATH']}"}
+    cache = Path(env["XDG_CACHE_HOME"]) / "claude-speak"
+    cache.mkdir(parents=True)
+    for name in ("kokoro-v1.0.int8.onnx", "voices-v1.0.bin"):
+        (cache / name).write_text("x")
+    assert "350 MB" in json.loads(run_hook(env, {"prompt": "speak"}).stdout)["reason"]
+    (cache / "kokoro-v1.0.onnx").write_text("x")
+    assert json.loads(run_hook(env, {"prompt": "speak"}).stdout)["reason"] == "🔊 Reading. Type shh to stop."
+
+
 def test_hook_mentions_the_first_download(hook_env):
     env, _ = hook_env
+    env = {**env, "CLAUDE_SPEAK_QUALITY": "fast"}
     out = json.loads(run_hook(env, {"prompt": "speak"}).stdout)
     assert "First time" in out["reason"]
     cache = Path(env["XDG_CACHE_HOME"]) / "claude-speak"

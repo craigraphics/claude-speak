@@ -88,8 +88,13 @@ fi
 set -m
 nohup "$uv" run --quiet --script "$here/speak.py" "${args[@]}" </dev/null >>"$log" 2>&1 &
 
+quality=${CLAUDE_SPEAK_QUALITY:-}
+if [ "$quality" != fast ] && [ "$quality" != high ]; then
+  # As speak.py picks: the full model is the faster one on Intel and AMD, int8 elsewhere.
+  case $(uname -m) in x86_64 | amd64 | i?86) quality=high ;; *) quality=fast ;; esac
+fi
 model="kokoro-v1.0.int8.onnx" size="140 MB"
-[ "${CLAUDE_SPEAK_QUALITY:-}" = high ] && model="kokoro-v1.0.onnx" size="350 MB"
+[ "$quality" = high ] && model="kokoro-v1.0.onnx" size="350 MB"
 if [ -s "$models/$model" ] && [ -s "$models/voices-v1.0.bin" ]; then
   block "🔊 Reading. Type shh to stop."
 fi
