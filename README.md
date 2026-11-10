@@ -1,3 +1,5 @@
+<img src=".claude-plugin/icon.png" alt="" width="96">
+
 # speak
 
 Hear Claude Code's replies instead of reading them. Type `speak` at the prompt and Claude's last reply is read out loud in a natural voice. Type `shh` to stop.
