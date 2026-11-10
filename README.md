@@ -30,7 +30,7 @@ Install once per computer. If you keep several Claude accounts in separate confi
 | `speak all` | `ctrl+x a` | everything Claude wrote in its last turn, including "let me check…" |
 | `shh` | `ctrl+x q` | silence |
 
-The keys work once you've added them (see [Keyboard shortcuts](#keyboard-shortcuts)). The commands `/speak`, `/speak-all` and `/shh` do the same as the words.
+The keys work once you've added them (see [Keyboard shortcuts](#keyboard-shortcuts)). The commands `/speak`, `/speak:all` and `/speak:shh` do the same as the words. `/speak` comes from the plugin's mod, so it needs a recent Claude Code; on an older one, type `speak`.
 
 The keys and commands answer with a plain line, `⎿ speak: 🔊 Reading. Type shh to stop.` A typed word gets the same answer under Claude Code's own label, "UserPromptSubmit operation blocked by hook". Claude Code always adds that label when a typed prompt is held back, and nothing can turn it off. Both ways skip Claude, so neither uses tokens. Typing `speak` while it's reading starts again from the top. The first time, the voice downloads first (a few seconds on a fast connection) and the reading starts when that's done.
 
@@ -86,8 +86,8 @@ To list every voice: `uv run --script ~/.cache/claude-speak/speak.py --voices`.
     {
       "context": "Chat",
       "bindings": {
-        "ctrl+x s": "command:speak:speak",
-        "ctrl+x a": "command:speak:speak-all",
+        "ctrl+x s": "command:speak",
+        "ctrl+x a": "command:speak:all",
         "ctrl+x q": "command:speak:shh"
       }
     }
@@ -107,7 +107,7 @@ To list every voice: `uv run --script ~/.cache/claude-speak/speak.py --voices`.
 
 ## How it works
 
-1. **The hook.** `hooks/hooks.json` registers a `UserPromptSubmit` hook, `scripts/hook.sh`, which looks at every prompt. Anything other than `speak`, `speak all` or `shh` (or the `/speak`, `/speak-all` and `/shh` commands, which a key shortcut sends) passes straight through in a few milliseconds without starting a process. For those, the hook starts `scripts/speak.py` in the background and blocks the prompt, so it never reaches Claude. On Claude Code builds that load mods, `hooks/speak.ts` answers the `/speak` commands before that hook would, so they show a plain line instead of the "blocked by hook" label. It runs the same `hook.sh`, and builds without mods fall back to the hook.
+1. **The hook.** `hooks/hooks.json` registers a `UserPromptSubmit` hook, `scripts/hook.sh`, which looks at every prompt. Anything other than `speak`, `speak all` or `shh` (or the `/speak:all` and `/speak:shh` commands, which a key shortcut sends) passes straight through in a few milliseconds without starting a process. For those, the hook starts `scripts/speak.py` in the background and blocks the prompt, so it never reaches Claude. On Claude Code builds that load mods, `hooks/speak.ts` adds the `/speak` command and answers all three commands before that hook would, so they show a plain line instead of the "blocked by hook" label. It runs the same `hook.sh`, and builds without mods fall back to the hook.
 2. **The reading.** `speak.py` finds the reply in the session transcript (`~/.claude/projects/…/<session>.jsonl`) and turns its markdown into sentences. Kokoro reads them, and the next sentence is generated while the current one plays.
 3. **The warm voice.** The first reading keeps the voice loaded and listens on a private socket (`~/.cache/claude-speak/speak.sock`), so later readings start at once. It unloads after 10 idle minutes.
 4. **The fallbacks.** If Kokoro can't run, the computer's own voice reads instead: `say` on macOS, `espeak-ng` on Linux.

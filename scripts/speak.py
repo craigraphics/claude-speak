@@ -1158,7 +1158,7 @@ def remove_key_bindings(dirs: Iterable[Path]) -> list[Path]:
         except FileNotFoundError:
             continue
         except (OSError, ValueError):
-            print(f"Left {f} as it is (it isn't plain JSON): remove the command:speak: lines by hand.")
+            print(f"Left {f} as it is (it isn't plain JSON): remove the command:speak lines by hand.")
             continue
         blocks = data.get("bindings") if isinstance(data, dict) else None
         if not isinstance(blocks, list):
@@ -1167,7 +1167,7 @@ def remove_key_bindings(dirs: Iterable[Path]) -> list[Path]:
         for block in blocks:
             keys = block.get("bindings") if isinstance(block, dict) else None
             if isinstance(keys, dict):
-                for key in [k for k, v in keys.items() if isinstance(v, str) and v.startswith("command:speak:")]:
+                for key in [k for k, v in keys.items() if v == "command:speak" or str(v).startswith("command:speak:")]:
                     del keys[key]
                     hit = True
         if not hit:

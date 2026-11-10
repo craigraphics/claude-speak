@@ -219,7 +219,7 @@ def wait_for(path: Path) -> str:
 def test_hook_ignores_ordinary_prompts(hook_env):
     env, calls = hook_env
     for prompt in ("hello", "please speak to the API", "speak up about this", "shh is a word",
-                   "/speakers", "/speak louder", "/other:speak", "/speak:"):
+                   "/speakers", "/speak louder", "/other:speak", "/speak:", "/speak:other", "/all"):
         result = run_hook(env, {"prompt": prompt, "transcript_path": "/x.jsonl"})
         assert result.returncode == 0 and result.stdout == "" and result.stderr == ""
     assert not calls.exists()
@@ -233,7 +233,7 @@ def test_hook_is_fast_for_ordinary_prompts(hook_env):
     assert (time.monotonic() - started) / 10 < 0.1
 
 
-@pytest.mark.parametrize("prompt", ["speak", "Speak", "  speak  ", "speak\n", "SPEAK", "/speak", "/speak:speak"])
+@pytest.mark.parametrize("prompt", ["speak", "Speak", "  speak  ", "speak\n", "SPEAK", "/speak"])
 def test_hook_speaks_and_blocks_the_prompt(hook_env, prompt):
     env, calls = hook_env
     result = run_hook(env, {"session_id": "s", "transcript_path": "/tmp/a b/t.jsonl", "prompt": prompt})
@@ -251,7 +251,7 @@ def test_hook_finds_the_session_by_id_when_given_no_path(hook_env):
     assert "--session 4c42-b7" in call and "--transcript" not in call
 
 
-@pytest.mark.parametrize("prompt", ["speak all", "/speak-all", "/speak:speak-all"])
+@pytest.mark.parametrize("prompt", ["speak all", "/speak:all"])
 def test_hook_speak_all(hook_env, prompt):
     env, calls = hook_env
     run_hook(env, {"transcript_path": "/t.jsonl", "prompt": prompt})
@@ -443,11 +443,11 @@ def test_only_speak_s_shortcuts_are_removed(tmp_path):
     for d in (shared, only, tmp_path / "c"):
         d.mkdir()
     (shared / "keybindings.json").write_text(json.dumps({"bindings": [
-        {"context": "Chat", "bindings": {"ctrl+x s": "command:speak:speak", "ctrl+e": "chat:externalEditor"}},
+        {"context": "Chat", "bindings": {"ctrl+x s": "command:speak", "ctrl+e": "chat:externalEditor"}},
         {"context": "Global", "bindings": {"ctrl+x q": "command:speak:shh"}},
     ]}))
     (only / "keybindings.json").write_text(json.dumps({"$schema": "x", "bindings": [
-        {"context": "Chat", "bindings": {"ctrl+x s": "command:speak:speak"}}]}))
+        {"context": "Chat", "bindings": {"ctrl+x s": "command:speak", "ctrl+x a": "command:speak:all"}}]}))
     (tmp_path / "c" / "keybindings.json").write_text("{ not json")
     assert speak.remove_key_bindings([shared, only, tmp_path / "c"]) == [shared / "keybindings.json", only / "keybindings.json"]
     assert json.loads((shared / "keybindings.json").read_text()) == {

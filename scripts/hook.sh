@@ -5,8 +5,8 @@
 #   speak all   hear the whole last turn, the "let me check…" narration included
 #   shh         stop
 #
-# or the plugin's commands /speak, /speak-all and /shh (also /speak:speak and so on,
-# which is what a key binding sends).
+# or the commands /speak, /speak:all and /speak:shh (/shh too), which key bindings send.
+# (On builds that load mods, hooks/speak.ts answers the commands before they get here.)
 #
 # Claude Code runs this on every prompt, so anything else leaves at the first check
 # without starting a single process. The trigger words are blocked: they never reach
@@ -16,7 +16,7 @@ input=$(cat)
 
 shopt -s nocasematch
 ws='([[:space:]]|\\[nrt])*'
-trigger="\"prompt\"[[:space:]]*:[[:space:]]*\"${ws}(/(speak:)?)?(speak${ws}all|speak-all|speak|shh)${ws}\""
+trigger="\"prompt\"[[:space:]]*:[[:space:]]*\"${ws}(/speak(:all|:shh)?|/shh|speak(${ws}all)?|shh)${ws}\""
 [[ $input =~ $trigger ]] || exit 0
 word=${BASH_REMATCH[0]}
 
