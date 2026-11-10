@@ -4,6 +4,8 @@
 #   speak       hear Claude's last reply
 #   speak all   hear the whole last turn, the "let me check…" narration included
 #   shh         stop
+#   stop        stop too, but only while speak is reading: otherwise the word goes to
+#               Claude as usual
 #
 # or the commands /speak, /speak:all and /speak:shh (/shh too), which key bindings send.
 # (On builds that load mods, hooks/speak.ts answers the commands before they get here.)
@@ -16,12 +18,39 @@ input=$(cat)
 
 shopt -s nocasematch
 ws='([[:space:]]|\\[nrt])*'
-trigger="\"prompt\"[[:space:]]*:[[:space:]]*\"${ws}(/speak(:all|:shh)?|/shh|speak(${ws}all)?|shh)${ws}\""
+trigger="\"prompt\"[[:space:]]*:[[:space:]]*\"${ws}(/speak(:all|:shh)?|/shh|speak(${ws}all)?|shh|stop)${ws}\""
 [[ $input =~ $trigger ]] || exit 0
 word=${BASH_REMATCH[0]}
 
 umask 077 # the cache folder and log are this user's alone
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-speak"
+
+# A speak process that leads its own process group: PIDs get reused, so check before signalling.
+is_speak() {
+  # shellcheck disable=SC2046 # split on purpose: "<pid> <pgid> <command…>"
+  set -- "$1" $(ps -o pgid= -o command= -p "$1" 2>/dev/null)
+  [ "$2" = "$1" ] && [[ "$*" == *speak.py* ]]
+}
+
+# The process reading right now, if any. speak.py writes its PID to $cache/reading while it
+# reads (loading included), and this hook writes the PID of a speak it has just started.
+reading_pid() {
+  local pid
+  pid=$(cat "$cache/reading" 2>/dev/null) || return 1
+  case $pid in '' | *[!0-9]*) return 1 ;; esac
+  is_speak "$pid" && printf '%s' "$pid"
+}
+
+# Stop the reading at once with SIGUSR1: speak.py stops playing and keeps the voice loaded;
+# a speak still starting up ends. The voice server is told too, in case it was taking over.
+interrupt() {
+  local server
+  kill -USR1 -- "-$1" 2>/dev/null
+  server=$(cat "$cache/playing.pid" 2>/dev/null)
+  if [ -n "$server" ] && [ "$server" != "$1" ] && is_speak "$server"; then
+    kill -USR1 -- "-$server" 2>/dev/null
+  fi
+}
 models="${CLAUDE_SPEAK_MODEL_DIR:-$cache}"
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
@@ -41,10 +70,7 @@ stop_playing() {
   pid=$(cat "$cache/playing.pid" 2>/dev/null) || return 1
   rm -f "$cache/playing.pid"
   case $pid in '' | *[!0-9]*) return 1 ;; esac
-  # Only if that PID is still a reading that leads its own process group: PIDs get reused.
-  # shellcheck disable=SC2046 # split on purpose: "<pgid> <command…>"
-  set -- $(ps -o pgid= -o command= -p "$pid" 2>/dev/null)
-  [ "$1" = "$pid" ] && [[ "$*" == *speak.py* ]] || return 1
+  is_speak "$pid" || return 1
   kill -TERM -- "-$pid" 2>/dev/null # the group, so a fallback `say` stops too
 }
 
@@ -60,13 +86,22 @@ find_uv() {
   return 1
 }
 
+if [[ $word == *stop* ]] || [[ $word == *shh* ]]; then
+  if pid=$(reading_pid); then
+    interrupt "$pid"
+    block "🔇 Stopped."
+  fi
+  [[ $word == *stop* ]] && exit 0 # nothing reading: an ordinary prompt, for Claude
+fi
+
 uv=$(find_uv)
 mkdir -p "$cache" && chmod 700 "$cache" 2>/dev/null
 log="$cache/last.log"
 [ -f "$log" ] && [ "$(wc -c <"$log")" -gt 1000000 ] && : >"$log" # keep the log small
 
 if [[ $word == *shh* ]]; then
-  # Ask the loaded voice to stop (it stays loaded for the next speak). Without uv, end it.
+  # Nothing marked as reading. An older speak, or one started by a hotkey, may still be:
+  # ask the loaded voice to stop (it stays loaded for the next speak). Without uv, end it.
   # --offline: if speak's packages were never downloaded, fail at once rather than fetch
   # them, which could outlast this hook's timeout.
   if [ -n "$uv" ] && reply=$("$uv" run --offline --quiet --script "$here/speak.py" --stop 2>>"$log"); then
@@ -92,6 +127,7 @@ id_re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9_-]+)"'
 # voice is already loaded this just hands it the text; otherwise it loads it.
 set -m
 nohup "$uv" run --quiet --script "$here/speak.py" "${args[@]}" </dev/null >>"$log" 2>&1 &
+printf '%s\n' "$!" >"$cache/reading" # so stop works while it starts up; speak.py takes over
 
 quality=${CLAUDE_SPEAK_QUALITY:-}
 if [ "$quality" != fast ] && [ "$quality" != high ]; then

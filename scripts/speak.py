@@ -74,6 +74,9 @@ APP = "claude-speak"
 CACHE = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / APP
 MODEL_DIR = Path(os.environ.get("CLAUDE_SPEAK_MODEL_DIR") or CACHE).expanduser()
 PID_FILE = CACHE / "playing.pid"
+# The PID of the process reading right now, loading included: the hook's `stop` and `shh`
+# send it SIGUSR1 rather than start uv, so they stop the voice at once.
+READING = CACHE / "reading"
 # Changes whenever this file does, so a voice server left running by an older version steps aside.
 SCRIPT_ID = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
 
@@ -895,6 +898,7 @@ class Speaker:
             self._generation += 1
             generation = self._generation
             self._readers += 1
+            mark_reading()
         threading.Thread(target=self._read, args=(generation, text, voice, speed, quality), daemon=True).start()
 
     def _read(self, generation: int, text: str, voice: str, speed: float, quality: str) -> None:
@@ -911,6 +915,8 @@ class Speaker:
             with self._lock:
                 self._readers -= 1
                 self.last_used = time.monotonic()
+                if self._readers == 0:
+                    unmark_reading()
 
 
 def reading(request: dict) -> tuple[str, str, float, str]:
@@ -1003,10 +1009,10 @@ def serve(first: dict) -> bool:
             server = _listen()
         except OSError as e:  # still read this one; later ones load the voice again
             log(f"Can't keep the voice loaded ({e}); reading without it")
-            text, voice, speed, quality = reading(first)
-            read_aloud(text, voice, speed, lambda: load_kokoro(quality))
+            read_now(*reading(first))
             return True
         speaker = Speaker()
+        signal.signal(signal.SIGUSR1, lambda *_: speaker.stop())  # the hook's stop and shh
         handle(speaker, first)
         why = f"No reading for {IDLE_SECONDS:.0f}s; unloading the voice"
         while True:
@@ -1084,6 +1090,35 @@ def claim_speaker() -> None:
     PID_FILE.write_text(str(os.getpid()))
 
 
+def mark_reading() -> None:
+    try:
+        _ensure_cache()
+        tmp = READING.with_name("reading.tmp")
+        tmp.write_text(str(os.getpid()))
+        os.replace(tmp, READING)
+    except OSError:
+        pass
+
+
+def unmark_reading() -> None:
+    try:
+        if READING.read_text().strip() == str(os.getpid()):
+            READING.unlink()
+    except OSError:
+        pass
+
+
+def read_now(text: str, voice: str, speed: float, quality: str) -> None:
+    """Read without a voice server: load the voice, read, and stop early on SIGUSR1."""
+    stopped = threading.Event()
+    signal.signal(signal.SIGUSR1, lambda *_: stopped.set())
+    mark_reading()
+    try:
+        read_aloud(text, voice, speed, lambda: load_kokoro(quality), lambda: not stopped.is_set())
+    finally:
+        unmark_reading()
+
+
 def release_speaker() -> None:
     try:
         if PID_FILE.read_text().strip() == str(os.getpid()):
@@ -1117,7 +1152,7 @@ def keep_stable_copy() -> None:
 # the other projects that share them.
 UV_PACKAGES = ("kokoro-onnx", "onnxruntime", "espeakng-loader", "phonemizer", "sounddevice")
 CACHE_FILES = ("speak.py", "speak.py.lock", "speak.py.tmp", "speak.py.lock.tmp", "last.log", "server.lock",
-               "playing.pid", "speak.sock", "__pycache__")
+               "playing.pid", "reading", "reading.tmp", "speak.sock", "__pycache__")
 
 
 def _size(path: Path) -> int:
@@ -1304,7 +1339,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         time.sleep(0.1)
     claim_speaker()
-    read_aloud(text, args.voice, args.speed, lambda: load_kokoro(args.quality))
+    read_now(text, args.voice, args.speed, args.quality)
     return 0
 
 

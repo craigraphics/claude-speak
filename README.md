@@ -29,10 +29,11 @@ Install once per computer. If you keep several Claude accounts in separate confi
 | `speak` | `ctrl+x s` | Claude's last reply: the message it wrote after its last tool call |
 | `speak all` | `ctrl+x a` | everything Claude wrote in its last turn, including "let me check…" |
 | `shh` | `ctrl+x q` | silence |
+| `stop` | | silence too, but only while speak is reading. When nothing is playing, `stop` goes to Claude like any other message |
 
 The keys work once you've added them (see [Keyboard shortcuts](#keyboard-shortcuts)). The commands `/speak`, `/speak:all` and `/speak:shh` do the same as the words. `/speak` comes from the plugin's mod, so it needs a recent Claude Code; on an older one, type `speak`.
 
-The keys and commands answer with a plain line, `⎿ speak: 🔊 Reading. Type shh to stop.` A typed word gets the same answer under Claude Code's own label, "UserPromptSubmit operation blocked by hook". Claude Code always adds that label when a typed prompt is held back, and nothing can turn it off. Both ways skip Claude, so neither uses tokens. Typing `speak` while it's reading starts again from the top. The first time, the voice downloads first (a few seconds on a fast connection) and the reading starts when that's done.
+The keys and commands answer with a plain line, `⎿ speak: 🔊 Reading. Type shh to stop.` A typed word gets the same answer under Claude Code's own label, "UserPromptSubmit operation blocked by hook". Claude Code always adds that label when a typed prompt is held back, and nothing can turn it off. Both ways skip Claude, so neither uses tokens. Typing `speak` while it's reading starts again from the top. `stop` and `shh` cut the voice off at once and leave it loaded for the next `speak`. The first time, the voice downloads first (a few seconds on a fast connection) and the reading starts when that's done.
 
 Replies are turned into speech, not read symbol by symbol:
 
@@ -118,7 +119,7 @@ To list every voice: `uv run --script ~/.cache/claude-speak/speak.py --voices`.
 
 - **What it reads.** The transcript of the session you typed `speak` in, which Claude Code keeps on your computer. A new session with no reply yet reads nothing; it never falls back to another session's. Only the hotkey for outside Claude Code (below) reads whichever session wrote last.
 - **What it sends.** Nothing about you or your sessions, anywhere. The only network use is the first-time download: the voice files from Kokoro's GitHub release (pinned by size and SHA-256, refused if larger), and the Python packages from PyPI through uv (pinned in `scripts/speak.py.lock`). No telemetry.
-- **The hook.** It runs on every prompt but only acts on the exact words `speak`, `speak all` and `shh` and the `/speak` commands. Anything else leaves it at the first check without starting a process. It never logs or stores your prompts.
+- **The hook.** It runs on every prompt but only acts on the exact words `speak`, `speak all`, `shh` and `stop` (`stop` only while speak is reading) and the `/speak` commands. Anything else leaves it at the first check without starting a process. It never logs or stores your prompts.
 - **What it writes.** Only in `~/.cache/claude-speak` (or `$XDG_CACHE_HOME/claude-speak`), a folder only you can open. The voice server listens on a socket there that only you can connect to, and speak only connects to a socket you own.
 - **What it runs.** `uv`, Python, and an audio player or the system voice if Kokoro can't play.
 

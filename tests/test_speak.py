@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -521,3 +522,84 @@ def test_the_hook_keeps_its_files_private(hook_env):
     cache = Path(env["XDG_CACHE_HOME"]) / "claude-speak"
     assert cache.stat().st_mode & 0o777 == 0o700
     assert (cache / "last.log").stat().st_mode & 0o777 == 0o600
+
+
+# --- stop ---------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def reading(hook_env, tmp_path):
+    """A stand-in speak.py, reading in its own process group, that notes the SIGUSR1 it gets."""
+    env, _ = hook_env
+    fake = tmp_path / "speak.py"
+    got = tmp_path / "got-signal"
+    fake.write_text(
+        "import pathlib, signal, sys, time\n"
+        f"signal.signal(signal.SIGUSR1, lambda *_: (pathlib.Path({str(got)!r}).write_text('USR1'), sys.exit(0)))\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(30)\n"
+    )
+    proc = subprocess.Popen([sys.executable, str(fake)], start_new_session=True, stdout=subprocess.PIPE, text=True)
+    assert proc.stdout.readline().strip() == "ready"
+    cache = Path(env["XDG_CACHE_HOME"]) / "claude-speak"
+    cache.mkdir(parents=True)
+    (cache / "reading").write_text(str(proc.pid))
+    yield got
+    proc.kill()
+    proc.wait()
+
+
+@pytest.mark.parametrize("prompt", ["stop", "Stop", " stop\n", "shh", "/speak:shh"])
+def test_stop_and_shh_end_a_reading_at_once(hook_env, reading, prompt):
+    env, calls = hook_env
+    started = time.monotonic()
+    out = json.loads(run_hook(env, {"prompt": prompt}).stdout)
+    assert out["decision"] == "block" and out["reason"] == "🔇 Stopped."
+    assert wait_for(reading) == "USR1"
+    assert time.monotonic() - started < 1.5
+    assert not calls.exists()  # no uv: that is what makes it instant
+
+
+def test_stop_with_nothing_reading_goes_to_claude(hook_env):
+    env, calls = hook_env
+    for prompt in ("stop", "stop the build", "please stop"):
+        result = run_hook(env, {"prompt": prompt})
+        assert result.returncode == 0 and result.stdout == "" and result.stderr == ""
+    assert not calls.exists() and not (Path(env["XDG_CACHE_HOME"]) / "claude-speak").exists()
+
+
+def test_a_stale_or_foreign_reading_mark_is_ignored(hook_env, tmp_path):
+    env, calls = hook_env
+    cache = Path(env["XDG_CACHE_HOME"]) / "claude-speak"
+    cache.mkdir(parents=True)
+    other = subprocess.Popen(["sleep", "30"], start_new_session=True)  # not speak: never signalled
+    try:
+        for pid in ("999999", str(other.pid), "not a pid"):
+            (cache / "reading").write_text(pid)
+            assert run_hook(env, {"prompt": "stop"}).stdout == ""
+            assert json.loads(run_hook(env, {"prompt": "shh"}).stdout)["reason"] == "🔇 Stopped."  # via uv
+        assert other.poll() is None
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_the_hook_marks_a_reading_it_starts(hook_env):
+    env, _ = hook_env
+    run_hook(env, {"prompt": "speak", "transcript_path": "/t.jsonl"})
+    mark = (Path(env["XDG_CACHE_HOME"]) / "claude-speak" / "reading").read_text().strip()
+    assert mark.isdigit()
+
+
+def test_the_voice_server_marks_its_readings(tmp_path, monkeypatch):
+    monkeypatch.setattr(speak, "CACHE", tmp_path)
+    monkeypatch.setattr(speak, "READING", tmp_path / "reading")
+    seen = []
+    monkeypatch.setattr(speak, "read_aloud", lambda *a: seen.append((tmp_path / "reading").read_text()))
+    speaker = speak.Speaker()
+    speaker.start("Hello.", "af_heart", 1.0, "fast")
+    for _ in range(50):
+        if not speaker.busy:
+            break
+        time.sleep(0.02)
+    assert seen == [str(os.getpid())] and not (tmp_path / "reading").exists()
