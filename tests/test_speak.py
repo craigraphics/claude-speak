@@ -197,7 +197,9 @@ def hook_env(tmp_path):
     fake = bin_dir / "uv"
     fake.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{calls}"\ncase "$*" in *--stop*) echo "Stopped." ;; esac\n')
     fake.chmod(0o755)
-    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "XDG_CACHE_HOME": str(tmp_path / "cache")}
+    # The stand-in comes first on PATH, so a real uv (/usr/bin/uv on some Linux systems) is
+    # never run: it would start real readings and download the voice into tmp_path.
+    env = {"HOME": str(home), "PATH": f"{bin_dir}:/usr/bin:/bin", "XDG_CACHE_HOME": str(tmp_path / "cache")}
     return env, calls
 
 
@@ -273,8 +275,9 @@ def test_hook_hides_the_original_prompt_line(hook_env):
 def test_hook_says_how_to_get_uv_when_it_is_missing(hook_env):
     env, _ = hook_env
     (Path(env["HOME"]) / ".local" / "bin" / "uv").unlink()
-    if any(Path(p).exists() for p in ("/opt/homebrew/bin/uv", "/usr/local/bin/uv")):
-        pytest.skip("uv is installed system-wide here")
+    places = ("/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin", "/home/linuxbrew/.linuxbrew/bin")
+    if any(Path(p, "uv").exists() for p in places):
+        pytest.skip("uv is installed system-wide here, where the hook looks")
     out = json.loads(run_hook(env, {"prompt": "speak"}).stdout)
     assert out["decision"] == "block" and "astral.sh/uv" in out["reason"]
     out = json.loads(run_hook(env, {"prompt": "shh"}).stdout)
@@ -315,3 +318,206 @@ def test_hook_mentions_the_first_download(hook_env):
         (cache / name).write_text("x")
     out = json.loads(run_hook(env, {"prompt": "speak"}).stdout)
     assert out["reason"] == "🔊 Reading. Type shh to stop."
+
+
+# --- Reading transcripts -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("chunk", [1, 7, 64, 1 << 20])
+def test_reading_from_the_end_in_chunks_finds_every_entry(chunk):
+    path = FIXTURES / "session.jsonl"
+    whole = [json.loads(line) for line in reversed(path.read_bytes().splitlines()) if line.strip()]
+    assert list(speak.entries_newest_first(path, chunk_size=chunk)) == whole
+
+
+def test_a_line_longer_than_a_chunk_is_read_whole(tmp_path):
+    path = tmp_path / "t.jsonl"
+    long = {"type": "assistant", "message": {"content": [{"type": "text", "text": "x" * 5000}]}}
+    path.write_text(json.dumps({"a": 1}) + "\n" + json.dumps(long) + "\n" + '{"half": ')
+    assert list(speak.entries_newest_first(path, chunk_size=100)) == [long, {"a": 1}]
+
+
+def test_the_transcript_named_or_the_session_s_never_another(tmp_path, monkeypatch):
+    mine = tmp_path / "mine.jsonl"
+    mine.write_text("{}\n")
+    monkeypatch.setattr(speak, "session_transcript", lambda s: mine if s == "s1" else None)
+    monkeypatch.setattr(speak, "latest_transcript", lambda: tmp_path / "someone-else.jsonl")
+    assert speak.pick_transcript(mine, None) == mine
+    assert speak.pick_transcript(tmp_path / "not-yet.jsonl", "s1") == mine
+    assert speak.pick_transcript(tmp_path / "not-yet.jsonl", "new") is None  # a brand-new session
+    assert speak.pick_transcript(tmp_path / "not-yet.jsonl", None) is None
+    assert speak.pick_transcript(None, None) == tmp_path / "someone-else.jsonl"  # a hotkey
+
+
+# --- The voice server and its requests ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "given, speed", [(1.3, 1.3), (0, 0.5), (-2, 0.5), (100, 2.0), ("fast", 1.1), (None, 1.1), (float("nan"), 1.1)]
+)
+def test_the_speed_stays_in_kokoro_s_range(given, speed):
+    assert speak.clamp_speed(given) == speed
+
+
+def test_odd_requests_get_the_defaults():
+    text, voice, speed, quality = speak.reading({"text": 5, "voice": ["x"], "speed": "9e9", "quality": "best"})
+    assert (text, voice, speed, quality) == ("5", speak.DEFAULT_VOICE, 2.0, speak.DEFAULT_QUALITY)
+
+
+def test_a_server_of_another_version_makes_way():
+    class Stub:
+        stopped = started = False
+
+        def stop(self):
+            self.stopped = True
+
+        def start(self, *a):
+            self.started = True
+
+    stub = Stub()
+    assert speak.handle(stub, {"cmd": "speak", "v": "other", "text": "hi"}) == {"ok": False, "stale": True}
+    assert stub.stopped and not stub.started
+    assert speak.handle(Stub(), {"cmd": "speak", "v": speak.SCRIPT_ID, "text": "hi"}) == {"ok": True}
+    assert speak.handle(Stub(), {"cmd": "stop"})["ok"] is True  # any version may stop it
+
+
+def test_only_a_socket_of_this_user_s_is_trusted():
+    import socket
+    import tempfile
+
+    path = Path(tempfile.mkdtemp(dir="/tmp")) / "s.sock"  # pytest's own folders are too long for a socket
+    assert not speak.own_socket(path)
+    path.write_text("not a socket")
+    assert not speak.own_socket(path)
+    path.unlink()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.bind(str(path))
+        assert speak.own_socket(path)
+
+
+def test_private_folders(tmp_path):
+    folder = speak._private_dir(tmp_path / "a" / "b")
+    assert folder.stat().st_mode & 0o777 == 0o700
+    os.chmod(folder, 0o755)
+    speak._private_dir(folder)
+    assert folder.stat().st_mode & 0o777 == 0o700
+    link = tmp_path / "link"
+    link.symlink_to(folder)
+    speak._private_dir(link)  # a symlinked cache folder is fine
+    with pytest.raises(PermissionError):
+        speak._private_dir(link, follow_symlinks=False)  # but not in a shared temp folder
+
+
+# --- Downloads and disk space ------------------------------------------------------------
+
+
+def test_a_download_larger_than_pinned_is_refused(tmp_path):
+    src = tmp_path / "model.bin"
+    src.write_bytes(b"x" * 1000)
+    part = tmp_path / "model.part"
+    speak._fetch(src.as_uri(), part, 1000)
+    assert part.read_bytes() == b"x" * 1000
+    with pytest.raises(speak.TooLarge):
+        speak._fetch(src.as_uri(), part, 999)
+
+
+def test_the_model_this_computer_doesnt_use_goes_after_a_week(tmp_path, monkeypatch):
+    monkeypatch.setattr(speak, "CACHE", tmp_path)
+    fast, high = (tmp_path / speak.MODELS[q][0] for q in ("fast", "high"))
+    for f in (fast, high):
+        f.write_bytes(b"model")
+    now = time.time()
+    os.utime(high, (now - 3 * 86400, now - 3 * 86400))
+    assert speak.drop_unused_models("fast", tmp_path, now) == []  # used 3 days ago: kept
+    os.utime(high, (now - 8 * 86400, now - 8 * 86400))
+    assert speak.drop_unused_models("fast", tmp_path, now) == [high]
+    assert fast.exists() and not high.exists()
+    assert speak.drop_unused_models("high", tmp_path / "elsewhere", now) == []  # a folder of the person's own
+
+
+# --- Uninstalling ------------------------------------------------------------------------
+
+
+def test_only_speak_s_shortcuts_are_removed(tmp_path):
+    shared, only = tmp_path / "a", tmp_path / "b"
+    for d in (shared, only, tmp_path / "c"):
+        d.mkdir()
+    (shared / "keybindings.json").write_text(json.dumps({"bindings": [
+        {"context": "Chat", "bindings": {"ctrl+x s": "command:speak:speak", "ctrl+e": "chat:externalEditor"}},
+        {"context": "Global", "bindings": {"ctrl+x q": "command:speak:shh"}},
+    ]}))
+    (only / "keybindings.json").write_text(json.dumps({"$schema": "x", "bindings": [
+        {"context": "Chat", "bindings": {"ctrl+x s": "command:speak:speak"}}]}))
+    (tmp_path / "c" / "keybindings.json").write_text("{ not json")
+    assert speak.remove_key_bindings([shared, only, tmp_path / "c"]) == [shared / "keybindings.json", only / "keybindings.json"]
+    assert json.loads((shared / "keybindings.json").read_text()) == {
+        "bindings": [{"context": "Chat", "bindings": {"ctrl+e": "chat:externalEditor"}}]}
+    assert not (only / "keybindings.json").exists()
+    assert (tmp_path / "c" / "keybindings.json").read_text() == "{ not json"
+
+
+def test_uninstall_removes_what_speak_made_and_nothing_else(tmp_path, monkeypatch, capsys):
+    cache = tmp_path / "cache" / "claude-speak"
+    cache.mkdir(parents=True)
+    made = [speak.MODELS["fast"][0], speak.VOICES[0], "last.log", "speak.py", "speak.py.lock", "server.lock",
+            ".download.lock", f"{speak.APP}-x.wav"]
+    for name in made:
+        (cache / name).write_text("x")
+    (cache / "mine.txt").write_text("the person's own")
+    env = tmp_path / "uv" / "environments-v2" / "speak-abc"
+    (env / "lib" / "python3.13" / "site-packages" / "kokoro_onnx").mkdir(parents=True)
+    calls = tmp_path / "uv-calls"
+    fake_uv = tmp_path / "uv-bin"
+    fake_uv.write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\necho "Removed 3 files (1.0MiB)"\n')
+    fake_uv.chmod(0o755)
+    for name, value in {"CACHE": cache, "MODEL_DIR": cache, "SOCKET": cache / "speak.sock",
+                        "PID_FILE": cache / "playing.pid"}.items():
+        monkeypatch.setattr(speak, name, value)
+    monkeypatch.setattr(speak, "uv_environments", lambda: [env])
+    monkeypatch.setattr(speak, "account_dirs", lambda: [])
+    monkeypatch.setenv("UV", str(fake_uv))
+    assert speak.uninstall() == 0
+    assert sorted(p.name for p in cache.iterdir()) == ["mine.txt"]
+    assert not env.exists()
+    assert calls.read_text().split() == ["cache", "clean", *speak.UV_PACKAGES]
+    out = capsys.readouterr().out
+    assert "claude plugin uninstall speak@claude-speak" in out and "files speak didn't make" in out
+
+
+# --- The hook, again ---------------------------------------------------------------------
+
+
+def test_the_hook_s_answer_is_valid_json_whatever_it_says(hook_env):
+    env, _ = hook_env
+    fake = Path(env["HOME"]) / ".local" / "bin" / "uv"
+    fake.write_text('#!/bin/sh\nprintf \'Said "hi" \\\\ back\\tthen\'\n')
+    out = json.loads(run_hook(env, {"prompt": "shh"}).stdout)
+    assert out["reason"] == '🔇 Said "hi" \\ back then'
+
+
+def test_shh_never_downloads_anything(hook_env):
+    env, calls = hook_env
+    run_hook(env, {"prompt": "shh"})
+    assert "--offline" in calls.read_text()
+
+
+def test_the_hook_passes_the_path_and_the_session(hook_env):
+    env, calls = hook_env
+    run_hook(env, {"session_id": "abc-1", "transcript_path": "/t.jsonl", "prompt": "speak"})
+    call = wait_for(calls)
+    assert "--transcript /t.jsonl" in call and "--session abc-1" in call
+
+
+def test_the_hook_is_fast_even_for_a_huge_prompt(hook_env):
+    env, calls = hook_env
+    started = time.monotonic()
+    result = run_hook(env, {"prompt": "speak " * 300_000, "transcript_path": "/t.jsonl"})
+    assert time.monotonic() - started < 1 and result.stdout == "" and not calls.exists()
+
+
+def test_the_hook_keeps_its_files_private(hook_env):
+    env, _ = hook_env
+    run_hook(env, {"prompt": "shh"})
+    cache = Path(env["XDG_CACHE_HOME"]) / "claude-speak"
+    assert cache.stat().st_mode & 0o777 == 0o700
+    assert (cache / "last.log").stat().st_mode & 0o777 == 0o600

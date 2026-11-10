@@ -16,8 +16,9 @@
     speak.py --text "Hello"       any text
     speak.py --dry-run            print what would be read instead of reading it
     speak.py --stop               stop whatever is playing
-    speak.py --setup              download the voice now (about 140 MB, once per computer)
+    speak.py --setup              download the voice now (140 to 350 MB, once per computer)
     speak.py --voices             list the voices
+    speak.py --uninstall          remove the voice, its Python packages, logs and shortcuts
 
 The voice is Kokoro (https://github.com/thewh1teagle/kokoro-onnx). It is free and works
 offline once downloaded. If it cannot run, the computer's own voice reads instead.
@@ -37,9 +38,11 @@ import os
 import platform
 import queue
 import re
+import math
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -58,23 +61,55 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def clamp_speed(value: object) -> float:
+    """Keep the speed in Kokoro's useful range: it doesn't check, and 0 or 100 makes garbage."""
+    try:
+        speed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return DEFAULT_SPEED
+    return min(2.0, max(0.5, speed)) if math.isfinite(speed) else DEFAULT_SPEED
+
+
 APP = "claude-speak"
 CACHE = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / APP
 MODEL_DIR = Path(os.environ.get("CLAUDE_SPEAK_MODEL_DIR") or CACHE).expanduser()
 PID_FILE = CACHE / "playing.pid"
+# Changes whenever this file does, so a voice server left running by an older version steps aside.
+SCRIPT_ID = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
 
 
 def _socket_path() -> Path:
     path = CACHE / "speak.sock"
     if len(str(path)) < 100:  # the limit for a Unix socket path is about 104 bytes
         return path
-    return Path(tempfile.gettempdir()) / f"{APP}-{os.getuid()}.sock"
+    # Too long: use a folder of this user's own in the runtime or temp folder (see _private_dir).
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    base = Path(runtime) if runtime and os.path.isdir(runtime) else Path(tempfile.gettempdir())
+    return base / f"{APP}-{os.getuid()}" / "speak.sock"
 
 
 SOCKET = _socket_path()
 
-# Pinned model files: (name, size, SHA-256), as GitHub publishes them for this release.
-MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/"
+
+def _private_dir(path: Path, follow_symlinks: bool = True) -> Path:
+    """Make `path` a folder only this user can open (0700), and refuse one that belongs to
+    someone else. In a shared folder like /tmp, symlinks are refused too."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    st = os.stat(path) if follow_symlinks else os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise PermissionError(f"{path} isn't a folder of this user's")
+    if st.st_mode & 0o077:
+        os.chmod(path, 0o700)
+    return path
+
+
+def _ensure_cache() -> Path:
+    return _private_dir(CACHE)
+
+
+# Pinned model files: (name, size, SHA-256), as GitHub publishes them for this release. A
+# mirror can serve the same files (CLAUDE_SPEAK_MODEL_URL): they are still checked.
+MODEL_URL = (os.environ.get("CLAUDE_SPEAK_MODEL_URL") or "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/").rstrip("/") + "/"
 MODELS = {
     # int8: a third of the download, and 2-3x faster on Apple Silicon and other ARM chips
     "fast": ("kokoro-v1.0.int8.onnx", 114119327, "ae315a79b623f244700e4afb9246c46a26066782e049ba174bf3ba433970ee9c"),
@@ -94,6 +129,7 @@ DEFAULT_QUALITY = default_quality()
 
 DEFAULT_VOICE = "af_heart"
 DEFAULT_SPEED = 1.1
+UNUSED_MODEL_DAYS = 7  # a voice model this computer hasn't loaded for a week is deleted
 IDLE_SECONDS = max(0.0, _env_float("CLAUDE_SPEAK_IDLE", 600))
 DEBUG = bool(os.environ.get("CLAUDE_SPEAK_DEBUG"))
 TRIGGERS = {"speak", "speak all", "shh"}
@@ -149,14 +185,41 @@ def session_transcript(session_id: str) -> Path | None:
     return None
 
 
-def entries_newest_first(path: Path) -> Iterator[dict]:
-    """Transcript entries from the end backwards. Lines that don't parse (one still being written) are skipped."""
-    for raw in reversed(path.read_bytes().splitlines()):
-        try:
-            entry = json.loads(raw)
-        except ValueError:
-            continue
-        if isinstance(entry, dict):
+def pick_transcript(transcript: Path | None, session: str | None) -> Path | None:
+    """The transcript to read: the one named, else the session's, else (when neither was
+    given, as from a hotkey) the newest. A session with no transcript yet gets None, never
+    another session's reply."""
+    if transcript is not None and transcript.is_file():
+        return transcript
+    if session:
+        return session_transcript(session)
+    return latest_transcript() if transcript is None else None
+
+
+def _entry(raw: bytes) -> dict | None:
+    try:
+        entry = json.loads(raw)
+    except ValueError:  # blank, or a line still being written
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
+def entries_newest_first(path: Path, chunk_size: int = 1 << 20) -> Iterator[dict]:
+    """Transcript entries from the end backwards, read a chunk at a time from the end, so a
+    long session costs no more than a short one. Lines that don't parse are skipped."""
+    with open(path, "rb") as f:
+        pos = f.seek(0, os.SEEK_END)
+        tail = b""
+        while pos > 0:
+            step = min(chunk_size, pos)
+            pos -= step
+            f.seek(pos)
+            lines = (f.read(step) + tail).split(b"\n")
+            tail = lines.pop(0)  # may carry on in the chunk before
+            for raw in reversed(lines):
+                if (entry := _entry(raw)) is not None:
+                    yield entry
+        if (entry := _entry(tail)) is not None:
             yield entry
 
 
@@ -442,16 +505,31 @@ def models_ready(quality: str = DEFAULT_QUALITY, model_dir: Path = MODEL_DIR) ->
     return all(_file_ok(model_dir / name, size) for name, size, _ in model_files(quality))
 
 
-def _fetch(url: str, part: Path) -> None:
+class TooLarge(ValueError):
+    """The server sent more than the pinned size: stop before it fills the disk."""
+
+
+def _fetch(url: str, part: Path, size: int) -> None:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": APP})
         with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
-            shutil.copyfileobj(r, f, 1 << 20)
+            left = size + 1  # one byte more than expected means it's the wrong file
+            while chunk := r.read(min(1 << 20, left)):
+                f.write(chunk)
+                left -= len(chunk)
+                if left <= 0:
+                    raise TooLarge(f"{url} is larger than {size} bytes")
+    except TooLarge:
+        raise
     except Exception as e:  # some Python builds lack certificates: curl has its own
         if not shutil.which("curl"):
             raise
         log(f"Python download failed ({e}); retrying with curl")
-        subprocess.run(["curl", "-fsSL", "--retry", "2", "-o", str(part), url], check=True)
+        protocols = "=https" if url.startswith("https:") else "=http,https"  # a plain-http mirror, if set
+        subprocess.run(
+            ["curl", "-fsSL", "--proto", protocols, "--retry", "2", "--max-filesize", str(size), "-o", str(part), url],
+            check=True,
+        )
 
 
 def _sha256(path: Path) -> str:
@@ -468,18 +546,24 @@ def ensure_models(quality: str = DEFAULT_QUALITY, model_dir: Path = MODEL_DIR) -
         return
     import fcntl
 
-    model_dir.mkdir(parents=True, exist_ok=True)
+    if model_dir == CACHE:
+        _ensure_cache()
+    else:
+        model_dir.mkdir(parents=True, exist_ok=True)
     with open(model_dir / ".download.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        for name, size, sha in model_files(quality):
+        missing = [(n, s, h) for n, s, h in model_files(quality) if not _file_ok(model_dir / n, s)]
+        need = sum(s for _, s, _ in missing)
+        free = shutil.disk_usage(model_dir).free
+        if missing and free < need + 50_000_000:
+            raise OSError(f"Not enough disk space for the voice: it needs {need / 1e6:.0f} MB, {free / 1e6:.0f} MB is free")
+        for name, size, sha in missing:
             dest = model_dir / name
-            if _file_ok(dest, size):
-                continue
             part = dest.with_name(dest.name + ".part")
             for attempt in range(3):
                 log(f"Downloading {name} ({size / 1e6:.0f} MB)…")
                 try:
-                    _fetch(MODEL_URL + name, part)
+                    _fetch(MODEL_URL + name, part, size)
                     if part.stat().st_size != size or _sha256(part) != sha:
                         raise OSError(f"{name} did not match its checksum")
                     os.replace(part, dest)
@@ -545,14 +629,46 @@ def load_kokoro(quality: str = DEFAULT_QUALITY):
     voice = os.environ.get("CLAUDE_SPEAK_VOICE") or DEFAULT_VOICE
     SYNTH.submit(_warm_phonemizer, LANGS.get(voice[:1], "en-us"))
     try:
-        return _open_model(quality)
+        engine = _open_model(quality)
     except Exception as e:
         if quality == "high":
             raise
         # Some onnxruntime builds (Intel Macs) can't run the int8 model: use the full one.
         log(f"The fast model can't run here ({type(e).__name__}); using the full one")
         ensure_models("high")
-        return _open_model("high")
+        engine, quality = _open_model("high"), "high"
+    drop_unused_models(quality)
+    return engine
+
+
+def drop_unused_models(used: str, model_dir: Path = MODEL_DIR, now: float | None = None) -> list[Path]:
+    """Mark the model in use, and delete the other one if it hasn't been loaded for a week:
+    a computer needs only one, and it is 114 or 326 MB. A week, not at once, so two accounts
+    set to different qualities don't download one over and over. A folder set with
+    CLAUDE_SPEAK_MODEL_DIR is the person's to manage and is left alone."""
+    if model_dir != CACHE:
+        return []
+    now = time.time() if now is None else now
+    removed: list[Path] = []
+    for quality, (name, _, _) in MODELS.items():
+        path = model_dir / name
+        try:
+            if quality == used:
+                os.utime(path, (now, now))
+            elif now - path.stat().st_mtime > UNUSED_MODEL_DAYS * 86400:
+                path.unlink()
+                removed.append(path)
+                log(f"Deleted {name}: this computer uses the other model")
+        except OSError:
+            pass
+    for part in model_dir.glob("*.part"):  # a download cut off a day or more ago
+        try:
+            if now - part.stat().st_mtime > 86400:
+                part.unlink()
+                removed.append(part)
+        except OSError:
+            pass
+    return removed
 
 
 def _run(cmd: list[str], alive: Alive, stdin_text: str | None = None) -> bool:
@@ -632,7 +748,7 @@ def _play_wav(audio, sample_rate: int, alive: Alive) -> bool:
     if player is None:
         raise RuntimeError("no audio player found (install pulseaudio-utils, pipewire or alsa-utils)")
     pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
-    CACHE.mkdir(parents=True, exist_ok=True)
+    _ensure_cache()
     with tempfile.NamedTemporaryFile(prefix=f"{APP}-", suffix=".wav", dir=CACHE, delete=False) as f:
         path = Path(f.name)
     try:
@@ -797,15 +913,25 @@ class Speaker:
                 self.last_used = time.monotonic()
 
 
+def reading(request: dict) -> tuple[str, str, float, str]:
+    """A speak request's text, voice, speed and quality, anything odd replaced by the default."""
+    quality = request.get("quality") if request.get("quality") in MODELS else DEFAULT_QUALITY
+    voice = request.get("voice") if isinstance(request.get("voice"), str) and request.get("voice") else DEFAULT_VOICE
+    return str(request.get("text") or ""), voice, clamp_speed(request.get("speed", DEFAULT_SPEED)), quality
+
+
+def is_stale(request: dict) -> bool:
+    """A speak request from a different version of this script: the server makes way for it."""
+    return request.get("cmd") == "speak" and request.get("v") not in (None, SCRIPT_ID)
+
+
 def handle(speaker: Speaker, request: dict) -> dict:
     command = request.get("cmd")
+    if is_stale(request):
+        speaker.stop()
+        return {"ok": False, "stale": True}
     if command == "speak":
-        try:
-            speed = float(request.get("speed") or DEFAULT_SPEED)
-        except (TypeError, ValueError):
-            speed = DEFAULT_SPEED
-        quality = request.get("quality") if request.get("quality") in MODELS else DEFAULT_QUALITY
-        speaker.start(str(request.get("text") or ""), str(request.get("voice") or DEFAULT_VOICE), speed, quality)
+        speaker.start(*reading(request))
         return {"ok": True}
     if command == "stop":
         return {"ok": True, "stopped": speaker.stop()}
@@ -814,8 +940,19 @@ def handle(speaker: Speaker, request: dict) -> dict:
     return {"ok": False, "error": f"unknown command {command!r}"}
 
 
+def own_socket(path: Path | None = None) -> bool:
+    """Whether the socket is one this user made: a reply's text never goes to anyone else's."""
+    try:
+        st = os.lstat(path or SOCKET)
+    except OSError:
+        return False
+    return stat.S_ISSOCK(st.st_mode) and st.st_uid == os.getuid()
+
+
 def send(request: dict) -> dict | None:
     """Hand a request to the running voice server. None if there isn't one."""
+    if not own_socket():
+        return None
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(3)
@@ -827,11 +964,33 @@ def send(request: dict) -> dict | None:
         return None
 
 
+def handed(reply: dict | None) -> bool:
+    return reply is not None and reply.get("ok") is True
+
+
+def _listen() -> socket.socket:
+    if SOCKET.parent == CACHE:
+        _ensure_cache()
+    else:  # in a shared temp folder: a folder of our own, never a symlink someone left there
+        _private_dir(SOCKET.parent, follow_symlinks=False)
+    SOCKET.unlink(missing_ok=True)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(str(SOCKET))
+        os.chmod(SOCKET, 0o600)
+        server.listen(8)
+    except OSError:
+        server.close()
+        raise
+    server.settimeout(0.5)
+    return server
+
+
 def serve(first: dict) -> bool:
     """Become the voice server, starting with `first`. False if another process already is one."""
     import fcntl
 
-    CACHE.mkdir(parents=True, exist_ok=True)
+    _ensure_cache()
     lock = open(CACHE / "server.lock", "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -840,14 +999,16 @@ def serve(first: dict) -> bool:
         return False
     try:
         claim_speaker()
-        SOCKET.unlink(missing_ok=True)
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(str(SOCKET))
-        os.chmod(SOCKET, 0o600)
-        server.listen(8)
-        server.settimeout(0.5)
+        try:
+            server = _listen()
+        except OSError as e:  # still read this one; later ones load the voice again
+            log(f"Can't keep the voice loaded ({e}); reading without it")
+            text, voice, speed, quality = reading(first)
+            read_aloud(text, voice, speed, lambda: load_kokoro(quality))
+            return True
         speaker = Speaker()
         handle(speaker, first)
+        why = f"No reading for {IDLE_SECONDS:.0f}s; unloading the voice"
         while True:
             try:
                 conn, _ = server.accept()
@@ -866,9 +1027,12 @@ def serve(first: dict) -> bool:
                     conn.sendall(json.dumps(reply).encode() + b"\n")
                 except OSError:
                     pass
+            if reply.get("stale"):
+                why = "Another version of speak asked to read; making way for it"
+                break
         server.close()
         SOCKET.unlink(missing_ok=True)
-        log(f"No reading for {IDLE_SECONDS:.0f}s; unloading the voice")
+        log(why)
     finally:
         release_speaker()
         lock.close()
@@ -916,7 +1080,7 @@ def claim_speaker() -> None:
     except OSError:
         pass
     stop_playing()
-    CACHE.mkdir(parents=True, exist_ok=True)
+    _ensure_cache()
     PID_FILE.write_text(str(os.getpid()))
 
 
@@ -933,7 +1097,7 @@ def keep_stable_copy() -> None:
     here = Path(__file__).resolve()
     if here.parent == CACHE.resolve():
         return
-    CACHE.mkdir(parents=True, exist_ok=True)
+    _ensure_cache()
     for src in (here, here.with_name(here.name + ".lock")):
         dst = CACHE / src.name
         try:
@@ -943,6 +1107,139 @@ def keep_stable_copy() -> None:
                 os.replace(tmp, dst)
         except OSError:
             pass
+
+
+# --------------------------------------------------------------------------------------
+# Uninstalling: everything speak put on the computer, apart from the plugin itself
+# --------------------------------------------------------------------------------------
+
+# uv's copies of the packages only speak needs. Common ones (numpy, sympy…) are left for
+# the other projects that share them.
+UV_PACKAGES = ("kokoro-onnx", "onnxruntime", "espeakng-loader", "phonemizer", "sounddevice")
+CACHE_FILES = ("speak.py", "speak.py.lock", "speak.py.tmp", "speak.py.lock.tmp", "last.log", "server.lock",
+               "playing.pid", "speak.sock", "__pycache__")
+
+
+def _size(path: Path) -> int:
+    if path.is_symlink() or not path.is_dir():
+        return path.lstat().st_size
+    return sum(f.lstat().st_size for f in path.rglob("*") if f.is_symlink() or not f.is_dir())
+
+
+def _remove(path: Path, removed: list[tuple[Path, int]]) -> None:
+    try:
+        if not (path.exists() or path.is_symlink()):
+            return
+        size = _size(path)
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        removed.append((path, size))
+    except OSError as e:
+        log(f"Couldn't remove {path}: {e}")
+
+
+def account_dirs() -> list[Path]:
+    """Every Claude Code config folder on this computer, used or not."""
+    dirs = [Path(os.environ["CLAUDE_CONFIG_DIR"]).expanduser()] if os.environ.get("CLAUDE_CONFIG_DIR") else []
+    dirs += sorted(Path.home().glob(".claude*"))
+    return [d for d in dict.fromkeys(dirs) if d.is_dir()]
+
+
+def remove_key_bindings(dirs: Iterable[Path]) -> list[Path]:
+    """Take speak's shortcuts out of each keybindings.json and leave every other one. A file
+    left with nothing else in it is deleted."""
+    changed: list[Path] = []
+    for d in dirs:
+        f = d / "keybindings.json"
+        try:
+            data = json.loads(f.read_text())
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            print(f"Left {f} as it is (it isn't plain JSON): remove the command:speak: lines by hand.")
+            continue
+        blocks = data.get("bindings") if isinstance(data, dict) else None
+        if not isinstance(blocks, list):
+            continue
+        hit = False
+        for block in blocks:
+            keys = block.get("bindings") if isinstance(block, dict) else None
+            if isinstance(keys, dict):
+                for key in [k for k, v in keys.items() if isinstance(v, str) and v.startswith("command:speak:")]:
+                    del keys[key]
+                    hit = True
+        if not hit:
+            continue
+        data["bindings"] = [b for b in blocks if not (isinstance(b, dict) and b.get("bindings") == {})]
+        if not data["bindings"] and set(data) <= {"$schema", "$docs", "bindings"}:
+            f.unlink()
+        else:
+            f.write_text(json.dumps(data, indent=2) + "\n")
+        changed.append(f)
+    return changed
+
+
+def uv_environments() -> list[Path]:
+    """The Python environments uv made for this script, one per set of dependencies it has had."""
+    here = Path(sys.prefix)
+    if here.parent.name.startswith("environments"):
+        roots = [here.parent]
+    else:
+        uv = os.environ.get("UV") or shutil.which("uv")
+        out = subprocess.run([uv, "cache", "dir"], capture_output=True, text=True).stdout.strip() if uv else ""
+        roots = sorted(Path(out).glob("environments-v*")) if out else []
+    return [env for root in roots for env in sorted(root.glob("speak-*"))
+            if any(env.glob("lib/python3*/site-packages/kokoro_onnx"))]
+
+
+def uninstall() -> int:
+    removed: list[tuple[Path, int]] = []
+    send({"cmd": "stop"})
+    stop_playing()  # ends the voice server too
+    for f in remove_key_bindings(account_dirs()):
+        print(f"Removed speak's shortcuts from {f}")
+
+    names = [name for name, _, _ in MODELS.values()] + [VOICES[0]]
+    for folder in dict.fromkeys([MODEL_DIR, CACHE]):
+        for name in names:
+            _remove(folder / name, removed)
+            _remove(folder / f"{name}.part", removed)
+        _remove(folder / ".download.lock", removed)
+    for name in CACHE_FILES:
+        _remove(CACHE / name, removed)
+    for wav in CACHE.glob(f"{APP}-*.wav") if CACHE.is_dir() else []:
+        _remove(wav, removed)
+    _remove(SOCKET, removed)
+    for folder in (SOCKET.parent, MODEL_DIR, CACHE):
+        try:
+            folder.rmdir()  # only if empty: anything else in it was not put there by speak
+        except OSError:
+            pass
+    files = sum(size for _, size in removed)
+    print(f"Removed the voice files and logs: {files / 1e6:.0f} MB.")
+    if CACHE.is_dir():
+        print(f"Left {CACHE}: it holds files speak didn't make.")
+
+    envs = uv_environments()
+    for env in envs:
+        _remove(env, removed)
+    if envs:
+        print(f"Removed {len(envs)} Python environment{'s' if len(envs) > 1 else ''} uv made for speak.")
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if uv:
+        done = subprocess.run([uv, "cache", "clean", *UV_PACKAGES], capture_output=True, text=True)
+        said = (done.stderr + done.stdout).strip().splitlines()
+        print(f"uv's copies of speak's packages: {said[-1] if said else 'removed'}")
+
+    print(
+        "\nNow remove the plugin itself, once for each Claude account:\n"
+        "  claude plugin uninstall speak@claude-speak\n"
+        "  claude plugin marketplace remove claude-speak\n"
+        "uv and any Python it installed stay: other tools may use them."
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -955,16 +1252,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--stop", action="store_true", help="stop the current reading")
     ap.add_argument("--setup", action="store_true", help="download the voice now")
     ap.add_argument("--voices", action="store_true", help="list the voices")
+    ap.add_argument("--uninstall", action="store_true", help="remove everything speak downloaded or made")
     ap.add_argument("--voice", default=os.environ.get("CLAUDE_SPEAK_VOICE") or DEFAULT_VOICE)
     ap.add_argument("--speed", type=float, default=_env_float("CLAUDE_SPEAK_SPEED", DEFAULT_SPEED))
     ap.add_argument(
         "--quality",
         choices=sorted(MODELS),
         default=os.environ.get("CLAUDE_SPEAK_QUALITY") if os.environ.get("CLAUDE_SPEAK_QUALITY") in MODELS else DEFAULT_QUALITY,
-        help="fast (default) or high: slower, and a 326 MB download instead of 114 MB",
+        help=f"fast (int8, 114 MB) or high (full precision, 326 MB); default: {DEFAULT_QUALITY}, the faster one on this CPU",
     )
     args = ap.parse_args(argv)
+    args.speed = clamp_speed(args.speed)
 
+    if args.uninstall:
+        return uninstall()
     if args.stop:
         reply = send({"cmd": "stop"})
         stopped = bool(reply.get("stopped")) if reply is not None else stop_playing()
@@ -979,9 +1280,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.text is not None:
         text = to_speech(args.text)
     else:
-        path = args.transcript or (args.session and session_transcript(args.session)) or latest_transcript()
-        if path is None or not path.exists():
-            log(f"No transcript found ({path})")
+        path = pick_transcript(args.transcript, args.session)
+        if path is None:
+            log(f"No transcript yet ({args.transcript or args.session or 'none on this computer'})")
             text = NOTHING_TO_READ
         else:
             log(f"Reading from {path}")
@@ -991,18 +1292,17 @@ def main(argv: list[str] | None = None) -> int:
         print(text)
         return 0
 
-    request = {"cmd": "speak", "text": text, "voice": args.voice, "speed": args.speed, "quality": args.quality}
-    if send(request) is not None:
+    request = {"cmd": "speak", "v": SCRIPT_ID, "text": text, "voice": args.voice, "speed": args.speed, "quality": args.quality}
+    if handed(send(request)):
         log("Handed to the voice that is already loaded")
         return 0
     keep_stable_copy()
-    if serve(request):
-        return 0
-    # Another process is starting up as the voice right now: hand over once it's listening.
+    # Become the voice; or, if another process is becoming it (or one of another version
+    # is making way for this one), hand over once it's listening.
     for _ in range(50):
-        time.sleep(0.1)
-        if send(request) is not None:
+        if serve(request) or handed(send(request)):
             return 0
+        time.sleep(0.1)
     claim_speaker()
     read_aloud(text, args.voice, args.speed, lambda: load_kokoro(args.quality))
     return 0

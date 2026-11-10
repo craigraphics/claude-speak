@@ -20,6 +20,7 @@ trigger="\"prompt\"[[:space:]]*:[[:space:]]*\"${ws}(/(speak:)?)?(speak${ws}all|s
 [[ $input =~ $trigger ]] || exit 0
 word=${BASH_REMATCH[0]}
 
+umask 077 # the cache folder and log are this user's alone
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-speak"
 models="${CLAUDE_SPEAK_MODEL_DIR:-$cache}"
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -28,7 +29,10 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # "UserPromptSubmit operation blocked by hook:"; suppressOriginalPrompt drops the
 # "Original prompt: speak" line it would otherwise add (older versions ignore it).
 block() {
-  printf '{"decision":"block","reason":"%s","hookSpecificOutput":{"hookEventName":"UserPromptSubmit","suppressOriginalPrompt":true}}\n' "$1"
+  local text=${1//\\/\\\\} # escaped for JSON: backslashes, quotes, and no control characters
+  text=${text//\"/\\\"}
+  text=${text//[$'\001'-$'\037']/ }
+  printf '{"decision":"block","reason":"%s","hookSpecificOutput":{"hookEventName":"UserPromptSubmit","suppressOriginalPrompt":true}}\n' "$text"
   exit 0
 }
 
@@ -57,13 +61,15 @@ find_uv() {
 }
 
 uv=$(find_uv)
-mkdir -p "$cache"
+mkdir -p "$cache" && chmod 700 "$cache" 2>/dev/null
 log="$cache/last.log"
 [ -f "$log" ] && [ "$(wc -c <"$log")" -gt 1000000 ] && : >"$log" # keep the log small
 
 if [[ $word == *shh* ]]; then
   # Ask the loaded voice to stop (it stays loaded for the next speak). Without uv, end it.
-  if [ -n "$uv" ] && reply=$("$uv" run --quiet --script "$here/speak.py" --stop 2>>"$log"); then
+  # --offline: if speak's packages were never downloaded, fail at once rather than fetch
+  # them, which could outlast this hook's timeout.
+  if [ -n "$uv" ] && reply=$("$uv" run --offline --quiet --script "$here/speak.py" --stop 2>>"$log"); then
     block "🔇 ${reply:-Stopped.}"
   fi
   if stop_playing; then block "🔇 Stopped."; fi
@@ -75,11 +81,10 @@ fi
 args=()
 path_re='"transcript_path"[[:space:]]*:[[:space:]]*"([^"]*)"'
 id_re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9_-]+)"'
-if [[ $input =~ $path_re ]] && [ -n "${BASH_REMATCH[1]}" ]; then
-  args+=(--transcript "${BASH_REMATCH[1]}")
-elif [[ $input =~ $id_re ]]; then
-  args+=(--session "${BASH_REMATCH[1]}") # from the mod, which knows the session but not the path
-fi
+# Both when given: speak.py reads the path, or finds the session's transcript by its id
+# (all the mod knows), and never another session's.
+[[ $input =~ $path_re ]] && [ -n "${BASH_REMATCH[1]}" ] && args+=(--transcript "${BASH_REMATCH[1]}")
+[[ $input =~ $id_re ]] && args+=(--session "${BASH_REMATCH[1]}")
 [[ $word == *all* ]] && args+=(--all)
 
 # Detached, in its own process group, with every stream redirected, so Claude Code

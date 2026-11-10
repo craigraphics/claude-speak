@@ -2,9 +2,10 @@
 
 Hear Claude Code's replies instead of reading them. Type `speak` at the prompt and Claude's last reply is read out loud in a natural voice. Type `shh` to stop.
 
-- **Free.** No API key, no account, no subscription. The voice ([Kokoro](https://huggingface.co/hexgrad/Kokoro-82M)) runs on your computer and works offline after a one-time download: about 140 MB on Apple Silicon, 350 MB on Intel and AMD.
+- **Free.** No API key, no account, no subscription. The voice ([Kokoro](https://huggingface.co/hexgrad/Kokoro-82M)) runs on your computer and works offline after a one-time download (see [Disk space](#disk-space)).
 - **Instant.** A hook catches the word before it reaches Claude, so listening costs no tokens and doesn't wait on the model. After the first reading the voice stays loaded for a while, and the next one starts in under a second.
 - **Only when you ask.** Nothing is read automatically.
+- **Private.** Nothing you or Claude write leaves your computer. See [Privacy and security](#privacy-and-security).
 
 ## Install
 
@@ -51,12 +52,14 @@ Set these as environment variables in your shell profile, or in the `env` sectio
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `CLAUDE_SPEAK_VOICE` | `af_heart` | Which voice reads (see below) |
-| `CLAUDE_SPEAK_SPEED` | `1.1` | `1.0` is Kokoro's normal pace |
+| `CLAUDE_SPEAK_SPEED` | `1.1` | `1.0` is Kokoro's normal pace; from `0.5` to `2.0` |
 | `CLAUDE_SPEAK_QUALITY` | depends on the CPU | `fast` is the int8 model (a 114 MB download), `high` the full-precision one (326 MB). By default speak uses whichever generates faster on your CPU: `fast` on Apple Silicon and other ARM chips, where it's 2–3× quicker, and `high` on Intel and AMD, where int8 is the slower one, by more than 2× on some chips. If the voice pauses mid-reading, your computer is generating slower than it speaks: try the other one |
 | `CLAUDE_SPEAK_IDLE` | `600` | How many seconds the voice stays loaded after a reading. `0` unloads it right away |
 | `CLAUDE_SPEAK_ENGINE` | | `system` uses the computer's own voice instead of Kokoro |
 | `CLAUDE_SPEAK_THREADS` | auto | CPU threads for the voice. On Apple Silicon the default is the performance cores |
-| `CLAUDE_SPEAK_DEBUG` | | `1` logs how long each sentence takes to generate |
+| `CLAUDE_SPEAK_DEBUG` | | `1` logs how long each sentence takes to generate, and any that came late |
+| `CLAUDE_SPEAK_MODEL_DIR` | `~/.cache/claude-speak` | Where the voice files are kept. speak never deletes anything in a folder you set here, apart from `--uninstall` |
+| `CLAUDE_SPEAK_MODEL_URL` | Kokoro's GitHub release | A mirror to download the voice files from, if your network blocks GitHub. The files are still checked against their SHA-256 |
 
 **Voices.** The first letter of a voice name is its accent or language: `a` is American, `b` is British. The second letter is `f` for female or `m` for male.
 
@@ -109,6 +112,25 @@ To list every voice: `uv run --script ~/.cache/claude-speak/speak.py --voices`.
 3. **The warm voice.** The first reading keeps the voice loaded and listens on a private socket (`~/.cache/claude-speak/speak.sock`), so later readings start at once. It unloads after 10 idle minutes.
 4. **The fallbacks.** If Kokoro can't run, the computer's own voice reads instead: `say` on macOS, `espeak-ng` on Linux.
 5. **Pinning.** Dependencies are pinned in `scripts/speak.py.lock`, and the voice files are checked against their SHA-256.
+6. **Updates.** A voice left loaded by an older version of speak makes way for the new one at the next reading.
+
+## Privacy and security
+
+- **What it reads.** The transcript of the session you typed `speak` in, which Claude Code keeps on your computer. A new session with no reply yet reads nothing; it never falls back to another session's. Only the hotkey for outside Claude Code (below) reads whichever session wrote last.
+- **What it sends.** Nothing about you or your sessions, anywhere. The only network use is the first-time download: the voice files from Kokoro's GitHub release (pinned by size and SHA-256, refused if larger), and the Python packages from PyPI through uv (pinned in `scripts/speak.py.lock`). No telemetry.
+- **The hook.** It runs on every prompt but only acts on the exact words `speak`, `speak all` and `shh` and the `/speak` commands. Anything else leaves it at the first check without starting a process. It never logs or stores your prompts.
+- **What it writes.** Only in `~/.cache/claude-speak` (or `$XDG_CACHE_HOME/claude-speak`), a folder only you can open. The voice server listens on a socket there that only you can connect to, and speak only connects to a socket you own.
+- **What it runs.** `uv`, Python, and an audio player or the system voice if Kokoro can't play.
+
+## Disk space
+
+| What | Where | Size |
+| --- | --- | --- |
+| The voice: one model and the voices file | `~/.cache/claude-speak` | 142 MB on Apple Silicon and other ARM chips, 354 MB on Intel and AMD |
+| Its Python packages (onnxruntime, Kokoro, espeak-ng…) | uv's cache, `uv cache dir` | about 100–150 MB |
+| A log of the last readings | `~/.cache/claude-speak/last.log` | at most 1 MB |
+
+A computer needs only one of the two models. If you switch `CLAUDE_SPEAK_QUALITY`, speak deletes the model it no longer uses after a week without loading it. `--uninstall` removes everything (below).
 
 ## Troubleshooting
 
@@ -120,11 +142,15 @@ To list every voice: `uv run --script ~/.cache/claude-speak/speak.py --voices`.
 
 ## Uninstall
 
+First remove what speak downloaded and made, then the plugin:
+
 ```sh
+uv run --script ~/.cache/claude-speak/speak.py --uninstall
 claude plugin uninstall speak@claude-speak
 claude plugin marketplace remove claude-speak
-rm -rf ~/.cache/claude-speak
 ```
+
+`--uninstall` stops the voice and removes the voice files, the log, its Python environment and uv's copies of its own packages. It also takes speak's lines out of `keybindings.json` and leaves your other shortcuts as they were. It says what it removed. It leaves uv, any Python uv installed, and packages other projects share, such as numpy. If `~/.cache/claude-speak/speak.py` doesn't exist, speak never downloaded anything on this computer. Run the two `claude plugin` lines once for each Claude account.
 
 ## Development
 
@@ -133,8 +159,9 @@ uv run --with pytest pytest tests     # tests: finding replies, cleaning text, t
 claude --plugin-dir .                  # try this checkout in Claude Code
 claude plugin validate .               # check the manifest, hooks.json and hooks/speak.ts
 uv lock --script scripts/speak.py      # after changing the dependencies at the top of speak.py
+uvx --from shellcheck-py shellcheck scripts/hook.sh
 ```
 
 ## License
 
-MIT. The voice is [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) by hexgrad (Apache 2.0), run through [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) by thewh1teagle (MIT). Both are downloaded from their own releases, not bundled here.
+MIT. The voice is [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) by hexgrad (Apache 2.0), run through [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) by thewh1teagle (MIT). Its text-to-phoneme step uses [phonemizer](https://github.com/bootphon/phonemizer) and the [espeak-ng](https://github.com/espeak-ng/espeak-ng) library from espeakng-loader, both GPL-3.0. All of them are downloaded from their own releases when speak first runs, not bundled here.
