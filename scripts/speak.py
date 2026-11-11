@@ -1082,7 +1082,8 @@ def _playing_pid() -> int | None:
     except (OSError, ValueError):
         return None
     try:
-        out = subprocess.run(["ps", "-o", "pgid=,command=", "-p", str(pid)], capture_output=True, text=True).stdout
+        # -ww: Linux ps cuts the command to $COLUMNS and would hide "speak.py".
+        out = subprocess.run(["ps", "-ww", "-o", "pgid=,command=", "-p", str(pid)], capture_output=True, text=True).stdout
     except OSError:
         return None
     fields = out.strip().split(None, 1)

@@ -200,7 +200,8 @@ def hook_env(tmp_path):
     fake.chmod(0o755)
     # The stand-in comes first on PATH, so a real uv (/usr/bin/uv on some Linux systems) is
     # never run: it would start real readings and download the voice into tmp_path.
-    env = {"HOME": str(home), "PATH": f"{bin_dir}:/usr/bin:/bin", "XDG_CACHE_HOME": str(tmp_path / "cache")}
+    # COLUMNS: Claude Code sets it for hooks, and Linux ps cuts its output to that width.
+    env = {"HOME": str(home), "PATH": f"{bin_dir}:/usr/bin:/bin", "XDG_CACHE_HOME": str(tmp_path / "cache"), "COLUMNS": "20"}
     return env, calls
 
 
@@ -558,6 +559,15 @@ def test_stop_and_shh_end_a_reading_at_once(hook_env, reading, prompt):
     assert wait_for(reading) == "USR1"
     assert time.monotonic() - started < 1.5
     assert not calls.exists()  # no uv: that is what makes it instant
+
+
+def test_the_voice_process_is_found_in_a_narrow_terminal(hook_env, reading, tmp_path, monkeypatch):
+    env, _ = hook_env
+    pid = (Path(env["XDG_CACHE_HOME"]) / "claude-speak" / "reading").read_text()
+    monkeypatch.setattr(speak, "PID_FILE", tmp_path / "playing.pid")
+    speak.PID_FILE.write_text(pid)
+    monkeypatch.setenv("COLUMNS", "20")
+    assert speak._playing_pid() == int(pid)
 
 
 def test_stop_with_nothing_reading_goes_to_claude(hook_env):

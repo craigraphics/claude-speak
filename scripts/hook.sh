@@ -26,9 +26,10 @@ umask 077 # the cache folder and log are this user's alone
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-speak"
 
 # A speak process that leads its own process group: PIDs get reused, so check before signalling.
+# -ww: Linux ps cuts the command to $COLUMNS, which Claude Code sets, and would hide "speak.py".
 is_speak() {
   # shellcheck disable=SC2046 # split on purpose: "<pid> <pgid> <command…>"
-  set -- "$1" $(ps -o pgid= -o command= -p "$1" 2>/dev/null)
+  set -- "$1" $(ps -ww -o pgid= -o command= -p "$1" 2>/dev/null)
   [ "$2" = "$1" ] && [[ "$*" == *speak.py* ]]
 }
 

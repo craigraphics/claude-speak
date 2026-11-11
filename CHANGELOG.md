@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 (2026-11-10)
+
+- `stop`, `shh` and `/speak:shh` now stop the voice on Linux. Linux `ps` cut the voice's command line to the terminal width, so speak didn't recognise its own process and `stop` went to Claude.
+
 ## 0.4.0 (2026-11-10)
 
 - `--save FILE.wav` writes a reading to a sound file instead of playing it.
