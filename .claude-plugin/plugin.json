@@ -1,6 +1,6 @@
 {
   "name": "speak",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Hear Claude's last reply in a natural voice: type speak to listen, shh to stop. Free, offline (Kokoro), no API keys.",
   "author": {
     "name": "William Craig",

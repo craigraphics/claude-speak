@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2 (2026-11-10)
+
+- Typed `speak`, `shh` and `stop` answer with a plain line, `speak: 🔇 Stopped.`, instead of "UserPromptSubmit operation blocked by hook", and the word no longer stays in the prompt box. Needs a Claude Code build that loads mods; only speak's own notices are changed.
+
 ## 0.4.1 (2026-11-10)
 
 - `stop`, `shh` and `/speak:shh` now stop the voice on Linux. Linux `ps` cut the voice's command line to the terminal width, so speak didn't recognise its own process and `stop` went to Claude.

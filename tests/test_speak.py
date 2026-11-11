@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -568,6 +569,18 @@ def test_the_voice_process_is_found_in_a_narrow_terminal(hook_env, reading, tmp_
     speak.PID_FILE.write_text(pid)
     monkeypatch.setenv("COLUMNS", "20")
     assert speak._playing_pid() == int(pid)
+
+
+def test_the_mod_knows_every_answer_of_the_hook():
+    """hooks/speak.ts takes the "blocked by hook" heading off speak's answers, found by their text."""
+    pattern = re.search(r"const SPEAKS = /(.+)/u", (ROOT / "hooks" / "speak.ts").read_text()).group(1)
+    answers = re.findall(r'block "([^"]+)"', HOOK.read_text())
+    assert len(answers) >= 7
+    for answer in answers:
+        for filled in {answer.replace("${reply:-Stopped.}", reply).replace("$size", "350 MB") for reply in ("Stopped.", "Nothing was playing.")}:
+            assert re.match(pattern, filled), filled
+    for other in ("🔇 Muted by another plugin.", "Blocked: secrets in the prompt", "🔊 Volume up"):
+        assert not re.match(pattern, other)
 
 
 def test_stop_with_nothing_reading_goes_to_claude(hook_env):
