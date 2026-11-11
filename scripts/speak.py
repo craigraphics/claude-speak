@@ -938,10 +938,10 @@ class Speaker:
             log(f"Reading failed ({type(e).__name__}: {e})")
         finally:
             with self._lock:
+                if self._readers == 1:  # the last one: unmark before it counts as done
+                    unmark_reading()
                 self._readers -= 1
                 self.last_used = time.monotonic()
-                if self._readers == 0:
-                    unmark_reading()
 
 
 def reading(request: dict) -> tuple[str, str, float, str]:
