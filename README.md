@@ -22,7 +22,18 @@ Then restart Claude Code. You can also do it from inside Claude Code with `/plug
 
 Install once per computer. If you keep several Claude accounts in separate config folders (`CLAUDE_CONFIG_DIR`), install once for each account too. All accounts on a computer share the same voice download.
 
+**Tested on:** Claude Code 2.1.3xx, macOS 26 on Apple Silicon, and Arch Linux on an Intel laptop. Every push also runs the real voice on Ubuntu, an Apple Silicon Mac and an Intel Mac. It needs only bash (3.2 or later, the one macOS ships) and uv, which brings its own Python.
+
 **Linux:** for gapless audio, also install PortAudio (`sudo apt install libportaudio2`). Without it, speak plays through `paplay`, `pw-play` or `aplay`. For a backup voice, also install `espeak-ng`.
+
+## Update
+
+```sh
+claude plugin marketplace update claude-speak
+claude plugin update speak@claude-speak
+```
+
+Then restart Claude Code, or run `/reload-plugins` in an open session. Run both lines once for each Claude account. What changed is in [CHANGELOG.md](CHANGELOG.md) and on the [releases page](https://github.com/craigraphics/claude-speak/releases). A voice still loaded from the old version makes way for the new one at the next `speak`; the voice files aren't downloaded again.
 
 ## Use
 
@@ -110,7 +121,7 @@ To list every voice: `uv run --script ~/.cache/claude-speak/speak.py --voices`. 
 
 ## How it works
 
-1. **The hook.** `hooks/hooks.json` registers a `UserPromptSubmit` hook, `scripts/hook.sh`, which looks at every prompt. Anything other than `speak`, `speak all` or `shh` (or the `/speak:all` and `/speak:shh` commands, which a key shortcut sends) passes straight through in a few milliseconds without starting a process. For those, the hook starts `scripts/speak.py` in the background and blocks the prompt, so it never reaches Claude. On Claude Code builds that load mods, `hooks/speak.ts` adds the `/speak` command and answers all three commands before that hook would, so they show a plain line instead of the "blocked by hook" label. For typed words it rewrites the hook's notice to the same plain line (only speak's own notices) and empties the word Claude Code puts back in the prompt box. It runs the same `hook.sh`, and builds without mods fall back to the hook.
+1. **The hook.** `hooks/hooks.json` registers a `UserPromptSubmit` hook, `scripts/hook.sh`, which looks at every prompt. Anything other than `speak`, `speak all`, `shh` or `stop` (or the `/speak:all` and `/speak:shh` commands, which a key shortcut sends) passes straight through in a few milliseconds without starting a process. For those, the hook starts `scripts/speak.py` in the background, or signals it to stop, and blocks the prompt, so it never reaches Claude. On Claude Code builds that load mods, `hooks/speak.ts` adds the `/speak` command and answers all three commands before that hook would, so they show a plain line instead of the "blocked by hook" label. For typed words it rewrites the hook's notice to the same plain line (only speak's own notices) and empties the word Claude Code puts back in the prompt box. It runs the same `hook.sh`, and builds without mods fall back to the hook.
 2. **The reading.** `speak.py` finds the reply in the session transcript (`~/.claude/projects/…/<session>.jsonl`) and turns its markdown into sentences. Kokoro reads them, and the next sentence is generated while the current one plays.
 3. **The warm voice.** The first reading keeps the voice loaded and listens on a private socket (`~/.cache/claude-speak/speak.sock`), so later readings start at once. It unloads after 10 idle minutes.
 4. **The fallbacks.** If Kokoro can't run, the computer's own voice reads instead: `say` on macOS, `espeak-ng` on Linux.
@@ -123,6 +134,7 @@ To list every voice: `uv run --script ~/.cache/claude-speak/speak.py --voices`. 
 - **What it sends.** Nothing about you or your sessions, anywhere. The only network use is the first-time download: the voice files from Kokoro's GitHub release (pinned by size and SHA-256, refused if larger), and the Python packages from PyPI through uv (pinned in `scripts/speak.py.lock`). No telemetry.
 - **The hook.** It runs on every prompt but only acts on the exact words `speak`, `speak all`, `shh` and `stop` (`stop` only while speak is reading) and the `/speak` commands. Anything else leaves it at the first check without starting a process. It never logs or stores your prompts.
 - **What it writes.** Only in `~/.cache/claude-speak` (or `$XDG_CACHE_HOME/claude-speak`), a folder only you can open. The voice server listens on a socket there that only you can connect to, and speak only connects to a socket you own.
+- **The log.** `~/.cache/claude-speak/last.log` records what speak did (which transcript it read, downloads, errors), not what was said. Only with `CLAUDE_SPEAK_DEBUG=1` does it include the first 30 characters of each spoken piece.
 - **What it runs.** `uv`, Python, and an audio player or the system voice if Kokoro can't play.
 
 ## Disk space
@@ -155,6 +167,19 @@ claude plugin marketplace remove claude-speak
 
 `--uninstall` stops the voice and removes the voice files, the log, its Python environment and uv's copies of its own packages. It also takes speak's lines out of `keybindings.json` and leaves your other shortcuts as they were. It says what it removed. It leaves uv, any Python uv installed, and packages other projects share, such as numpy. If `~/.cache/claude-speak/speak.py` doesn't exist, speak never downloaded anything on this computer. Run the two `claude plugin` lines once for each Claude account.
 
+## What it depends on
+
+speak reads two things Claude Code doesn't promise to keep stable, so a Claude Code update can affect it:
+
+- **The session transcript format.** If it changes, speak may say "There's no reply to read yet." The tests pin the format speak understands.
+- **Mods** (`hooks/speak.ts`), which give the bare `/speak` command and the plain answer lines. If a build doesn't load mods, or the mod fails, everything falls back to the shell hook: typing `speak`, `speak all`, `shh` and `stop` still works.
+
+The voice's Python packages are pinned in `scripts/speak.py.lock` and the voice files by SHA-256, so every computer runs the same versions until a release changes them. A weekly CI run checks that those downloads still work.
+
+## Help
+
+Found a bug, or it doesn't work on your computer? [Open an issue](https://github.com/craigraphics/claude-speak/issues) with your OS, CPU, `claude --version` and the end of `~/.cache/claude-speak/last.log` (check it for anything private first). For a security problem, see [SECURITY.md](SECURITY.md). To change the code, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Development
 
 ```sh
@@ -164,6 +189,8 @@ claude plugin validate .               # check the manifest, hooks.json and hook
 uv lock --script scripts/speak.py      # after changing the dependencies at the top of speak.py
 uvx --from shellcheck-py shellcheck scripts/hook.sh
 ```
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the layout of the code, the rules it follows and how a release is made.
 
 ## License
 

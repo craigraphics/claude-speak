@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # The actions in .github/workflows are pinned by commit: this proposes the new pins.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
