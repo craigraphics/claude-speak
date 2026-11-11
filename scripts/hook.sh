@@ -86,6 +86,14 @@ find_uv() {
   return 1
 }
 
+case $OSTYPE in msys* | cygwin* | win32*)
+  # speak.py needs macOS or Linux (Unix sockets, process groups, signals). Say so, rather than
+  # answer "Reading" and fail out of sight. stop is left for Claude.
+  [[ $word == *stop* ]] && exit 0
+  block "speak works on macOS and Linux; Windows isn't supported yet."
+  ;;
+esac
+
 if [[ $word == *stop* ]] || [[ $word == *shh* ]]; then
   if pid=$(reading_pid); then
     interrupt "$pid"

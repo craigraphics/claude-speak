@@ -15,6 +15,7 @@
     speak.py --transcript FILE    the last reply in that session transcript
     speak.py --text "Hello"       any text
     speak.py --dry-run            print what would be read instead of reading it
+    speak.py --save FILE.wav      write the reading to a WAV file instead of playing it
     speak.py --stop               stop whatever is playing
     speak.py --setup              download the voice now (140 to 350 MB, once per computer)
     speak.py --voices             list the voices
@@ -740,9 +741,17 @@ class Player:
         self.stream = None
 
 
-def _play_wav(audio, sample_rate: int, alive: Alive) -> bool:
+def write_wav(path: Path, audio, sample_rate: int) -> None:
     import numpy as np
 
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+
+
+def _play_wav(audio, sample_rate: int, alive: Alive) -> bool:
     if sys.platform == "darwin":
         players = [["afplay"]]
     else:
@@ -750,16 +759,11 @@ def _play_wav(audio, sample_rate: int, alive: Alive) -> bool:
     player = next((p for p in players if shutil.which(p[0])), None)
     if player is None:
         raise RuntimeError("no audio player found (install pulseaudio-utils, pipewire or alsa-utils)")
-    pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
     _ensure_cache()
     with tempfile.NamedTemporaryFile(prefix=f"{APP}-", suffix=".wav", dir=CACHE, delete=False) as f:
         path = Path(f.name)
     try:
-        with wave.open(str(path), "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(sample_rate)
-            w.writeframes(pcm)
+        write_wav(path, audio, sample_rate)
         return _run([*player, str(path)], alive)
     finally:
         path.unlink(missing_ok=True)
@@ -780,6 +784,27 @@ def system_voice(text: str, alive: Alive = _always) -> None:
         _run(["spd-say", "-w", text], alive)
         return
     log("No voice available: install espeak-ng, or let the Kokoro voice download finish.")
+
+
+def save_reading(text: str, voice: str, speed: float, quality: str, path: Path) -> float:
+    """Generate the whole reading into a WAV file instead of playing it; returns its length in
+    seconds. No audio device needed, so the tests run the real voice on machines without one."""
+    import numpy as np
+
+    engine = load_kokoro(quality)
+    if voice not in engine.get_voices():
+        voice = DEFAULT_VOICE
+    lang = LANGS.get(voice[:1], "en-us")
+    chunks, rate = [], 24000
+    for i, (piece, pause) in enumerate(pieces(text)):
+        started = time.monotonic()
+        audio, rate = engine.create(piece, voice=voice, speed=speed, lang=lang)
+        if DEBUG:
+            log(f"piece {i}: {time.monotonic() - started:.2f}s for {len(audio) / rate:.2f}s of audio ({piece[:30]!r})")
+        chunks += [audio.astype(np.float32), np.zeros(int(rate * pause), np.float32)]
+    audio = np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
+    write_wav(path, audio, rate)
+    return len(audio) / rate
 
 
 def read_aloud(text: str, voice: str, speed: float, get_engine: Callable, alive: Alive = _always) -> None:
@@ -1278,12 +1303,16 @@ def uninstall() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if os.name == "nt":
+        print("speak works on macOS and Linux; Windows isn't supported.", file=sys.stderr)
+        return 1
     ap = argparse.ArgumentParser(description="Read Claude Code's last reply out loud.")
     ap.add_argument("--transcript", type=Path, help="session transcript (.jsonl); default: the most recent one")
     ap.add_argument("--session", help="session id, to find its transcript when no path is given")
     ap.add_argument("--all", action="store_true", help="read the whole last turn, not just its final message")
     ap.add_argument("--text", help="read this text instead of a reply")
     ap.add_argument("--dry-run", action="store_true", help="print what would be read")
+    ap.add_argument("--save", type=Path, metavar="FILE.wav", help="write the reading to a WAV file instead of playing it")
     ap.add_argument("--stop", action="store_true", help="stop the current reading")
     ap.add_argument("--setup", action="store_true", help="download the voice now")
     ap.add_argument("--voices", action="store_true", help="list the voices")
@@ -1325,6 +1354,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         print(text)
+        return 0
+    if args.save:
+        seconds = save_reading(text, args.voice, args.speed, args.quality, args.save)
+        print(f"Saved {seconds:.1f} seconds of speech to {args.save}")
         return 0
 
     request = {"cmd": "speak", "v": SCRIPT_ID, "text": text, "voice": args.voice, "speed": args.speed, "quality": args.quality}

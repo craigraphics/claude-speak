@@ -24,3 +24,43 @@ jobs:
         run: uv run --python 3.13 --with pytest pytest tests
       - name: Shellcheck
         run: uvx --from shellcheck-py shellcheck scripts/hook.sh
+
+  # The real voice, end to end: install speak's pinned packages, download and check the voice
+  # files, and generate speech into a WAV file (the runners have no speakers). Each machine
+  # uses the model speak picks for its CPU: int8 on Apple Silicon, the full one on Intel.
+  voice:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      CLAUDE_SPEAK_DEBUG: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - name: Keep the voice files between runs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/claude-speak/*.onnx
+            ~/.cache/claude-speak/*.bin
+          key: kokoro-v1.0-model-files-v1.1-${{ runner.os }}-${{ runner.arch }}
+      - name: Speak some text
+        run: uv run --script scripts/speak.py --text "Hello. This checks that the voice loads and speaks, sentence by sentence, on this machine." --save "$RUNNER_TEMP/text.wav"
+      - name: Speak a reply from a transcript
+        run: uv run --script scripts/speak.py --transcript tests/fixtures/session.jsonl --save "$RUNNER_TEMP/reply.wav"
+      - name: Check the speech
+        run: |
+          uv run --no-project python - "$RUNNER_TEMP/text.wav" "$RUNNER_TEMP/reply.wav" <<'PY'
+          import array, sys, wave
+          for path in sys.argv[1:]:
+              with wave.open(path) as w:
+                  seconds = w.getnframes() / w.getframerate()
+                  peak = max(abs(s) for s in array.array("h", w.readframes(w.getnframes())))
+              print(f"{path}: {seconds:.1f} s of audio, peak {peak}")
+              assert seconds > 2 and peak > 1000, "no speech in it"
+          PY

@@ -603,3 +603,27 @@ def test_the_voice_server_marks_its_readings(tmp_path, monkeypatch):
             break
         time.sleep(0.02)
     assert seen == [str(os.getpid())] and not (tmp_path / "reading").exists()
+
+
+# --- Windows ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ostype", ["msys", "cygwin"])
+def test_on_windows_the_hook_says_so_instead_of_failing_quietly(hook_env, ostype):
+    env, calls = hook_env
+
+    def run(prompt: str) -> str:
+        # OSTYPE is bash's own: set it inside the shell, then run the hook there.
+        return subprocess.run(["bash", "-c", f'OSTYPE={ostype}; . "$0"', str(HOOK)], input=json.dumps({"prompt": prompt}),
+                              capture_output=True, text=True, env=env, timeout=10).stdout
+
+    assert "Windows isn't supported" in json.loads(run("speak"))["reason"]
+    assert "Windows isn't supported" in json.loads(run("/speak:shh"))["reason"]
+    assert run("stop") == ""  # left for Claude
+    assert not calls.exists()
+
+
+def test_speak_py_says_windows_isnt_supported(monkeypatch, capsys):
+    monkeypatch.setattr(speak.os, "name", "nt")
+    assert speak.main(["--text", "hi"]) == 1
+    assert "Windows" in capsys.readouterr().err

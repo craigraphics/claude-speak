@@ -11,7 +11,7 @@ Hear Claude Code's replies instead of reading them. Type `speak` at the prompt a
 
 ## Install
 
-You need macOS or Linux, Claude Code, and [uv](https://docs.astral.sh/uv/). If you don't have uv, run `curl -LsSf https://astral.sh/uv/install.sh | sh` (or `brew install uv`).
+You need macOS or Linux, Claude Code, and [uv](https://docs.astral.sh/uv/). Windows isn't supported yet; WSL is untested. If you don't have uv, run `curl -LsSf https://astral.sh/uv/install.sh | sh` (or `brew install uv`).
 
 ```sh
 claude plugin marketplace add craigraphics/claude-speak
@@ -76,7 +76,7 @@ To try a voice before choosing it:
 CLAUDE_SPEAK_VOICE=bm_george uv run --script ~/.cache/claude-speak/speak.py --text "Hello, this is how I sound."
 ```
 
-To list every voice: `uv run --script ~/.cache/claude-speak/speak.py --voices`.
+To list every voice: `uv run --script ~/.cache/claude-speak/speak.py --voices`. To keep a reading as a sound file, add `--save reply.wav`.
 
 ## Keyboard shortcuts
 
