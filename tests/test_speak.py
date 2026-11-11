@@ -650,3 +650,49 @@ def test_speak_py_says_windows_isnt_supported(monkeypatch, capsys):
     monkeypatch.setattr(speak.os, "name", "nt")
     assert speak.main(["--text", "hi"]) == 1
     assert "Windows" in capsys.readouterr().err
+
+
+class FakeStream:
+    def __init__(self):
+        self.frames = []
+
+    def write(self, frames):
+        self.frames.append(frames.copy())
+
+
+def _player(monkeypatch, lead=0.4):
+    np = pytest.importorskip("numpy")
+    monkeypatch.setattr(speak, "LEAD_SECONDS", lead)
+    player = speak.Player(lambda: True)
+    player.stream, player.mode = FakeStream(), "stream"
+    return np, player
+
+
+def _leading_silence(np, player):
+    audio = np.concatenate(player.stream.frames).ravel()
+    return int(np.argmax(audio != 0))
+
+
+def test_silence_plays_before_the_first_word_so_the_device_is_awake(monkeypatch):
+    np, player = _player(monkeypatch)
+    player.play(np.ones(2400, np.float32), 24000, 0)
+    assert _leading_silence(np, player) == int(24000 * 0.4)
+    player.play(np.ones(2400, np.float32), 24000, 0)  # and only before the first piece
+    assert len(np.concatenate(player.stream.frames)) == int(24000 * 0.4) + 4800
+
+
+def test_the_lead_in_is_played_while_waiting_for_the_first_piece(monkeypatch):
+    np, player = _player(monkeypatch)
+    for _ in range(10):  # a full second of waiting: the lead-in stops at its length
+        player.lead(0.1)
+    player.play(np.ones(2400, np.float32), 24000, 0)
+    assert _leading_silence(np, player) == int(24000 * 0.4)
+    player.lead(0.1)  # nothing once the voice has started
+    assert len(np.concatenate(player.stream.frames)) == int(24000 * 0.4) + 2400
+
+
+def test_the_lead_in_can_be_turned_off(monkeypatch):
+    np, player = _player(monkeypatch, lead=0)
+    player.lead(0.1)
+    player.play(np.ones(2400, np.float32), 24000, 0)
+    assert _leading_silence(np, player) == 0

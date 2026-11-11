@@ -135,6 +135,10 @@ DEFAULT_VOICE = "af_heart"
 DEFAULT_SPEED = 1.1
 UNUSED_MODEL_DAYS = 7  # a voice model this computer hasn't loaded for a week is deleted
 IDLE_SECONDS = max(0.0, _env_float("CLAUDE_SPEAK_IDLE", 600))
+# Silence played before the first word. A sound device that was idle (Bluetooth most of all)
+# takes a moment to wake and swallows what plays meanwhile: the first word or two.
+LEAD_SECONDS = min(3.0, max(0.0, _env_float("CLAUDE_SPEAK_LEAD", 0.4)))
+SAMPLE_RATE = 24000  # Kokoro's
 DEBUG = bool(os.environ.get("CLAUDE_SPEAK_DEBUG"))
 TRIGGERS = {"speak", "speak all", "shh"}
 
@@ -706,21 +710,47 @@ class Player:
         self.alive = alive
         self.stream = None
         self.mode = ""
+        self.led = 0.0  # seconds of silence played so far, before the first word
+        self.started = False
+
+    def _open(self, sample_rate: int) -> None:
+        if self.mode:
+            return
+        try:
+            import sounddevice as sd
+
+            self.stream = sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32")
+            self.stream.start()
+            self.mode = "stream"
+        except Exception as e:
+            log(f"PortAudio unavailable ({e}); using a command-line player")
+            self.mode = "cli"
+
+    def lead(self, seconds: float, sample_rate: int = SAMPLE_RATE) -> None:
+        """Play silence while the first piece is still being generated: it wakes the sound
+        device during a wait that happens anyway, so the lead-in rarely adds any delay."""
+        if self.started or self.led >= LEAD_SECONDS:
+            return
+        import numpy as np
+
+        self._open(sample_rate)
+        if self.mode == "stream":
+            self.stream.write(np.zeros((int(sample_rate * seconds), 1), np.float32))
+            self.led += seconds
 
     def play(self, audio, sample_rate: int, pause: float) -> bool:
         import numpy as np
 
-        audio = np.concatenate([audio.astype(np.float32), np.zeros(int(sample_rate * pause), np.float32)])
-        if not self.mode:
-            try:
-                import sounddevice as sd
-
-                self.stream = sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32")
-                self.stream.start()
-                self.mode = "stream"
-            except Exception as e:
-                log(f"PortAudio unavailable ({e}); using a command-line player")
-                self.mode = "cli"
+        self._open(sample_rate)
+        before = 0.0
+        if not self.started:  # whatever of the lead-in the wait didn't cover
+            self.started = True
+            before = max(0.0, LEAD_SECONDS - self.led)
+        audio = np.concatenate([
+            np.zeros(int(sample_rate * before), np.float32),
+            audio.astype(np.float32),
+            np.zeros(int(sample_rate * pause), np.float32),
+        ])
         if self.mode == "cli":
             return _play_wav(audio, sample_rate, self.alive)
         step = sample_rate // 10  # small writes, so a stop takes effect within a tenth of a second
@@ -857,6 +887,7 @@ def read_aloud(text: str, voice: str, speed: float, get_engine: Callable, alive:
             try:
                 item = ready.get(timeout=0.1)
             except queue.Empty:
+                player.lead(0.1)
                 continue
             if item is None:
                 break

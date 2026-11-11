@@ -24,7 +24,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
       - name: Tests
-        run: uv run --python 3.13 --with pytest pytest tests
+        run: uv run --python 3.13 --with pytest --with numpy pytest tests
       - name: Shellcheck
         run: uvx --from shellcheck-py shellcheck scripts/hook.sh
 

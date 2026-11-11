@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.3 (2026-11-11)
+
+- The first word or two is no longer cut off when the sound device was idle (Bluetooth headphones most of all). speak plays a short silence first, 0.4 seconds by default, mostly while the first sentence is still being generated, so it rarely adds a delay. `CLAUDE_SPEAK_LEAD` sets its length.
+
 ## 0.4.2 (2026-11-10)
 
 - Typed `speak`, `shh` and `stop` answer with a plain line, `speak: 🔇 Stopped.`, instead of "UserPromptSubmit operation blocked by hook", and the word no longer stays in the prompt box. Needs a Claude Code build that loads mods; only speak's own notices are changed.

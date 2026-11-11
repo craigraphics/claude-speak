@@ -26,7 +26,7 @@ Bug reports and pull requests are welcome. For anything larger than a fix, open 
 ## Checks
 
 ```sh
-uv run --with pytest pytest tests
+uv run --with pytest --with numpy pytest tests
 uvx --from shellcheck-py shellcheck scripts/hook.sh
 claude plugin validate .
 claude --plugin-dir .          # try it for real: speak, speak all, shh, stop
